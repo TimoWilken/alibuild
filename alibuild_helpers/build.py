@@ -272,7 +272,7 @@ class S3RemoteSync:
 
   def syncToLocal(self, p, spec):
     debug("Updating remote store for package %s@%s" % (p, spec["hash"]))
-    cmd = format(
+    cmd = format("set -x\n"
                  "s3cmd --no-check-md5 sync -s -v --host s3.cern.ch --host-bucket %(b)s.s3.cern.ch s3://%(b)s/%(storePath)s/ %(tarballHashDir)s/ 2>&1 || true\n"
                  "mkdir -p '%(tarballLinkDir)s'; find '%(tarballLinkDir)s' -type l -delete;\n"
                  "for x in `curl -sL https://s3.cern.ch/swift/v1/%(b)s/?prefix=%(linksPath)s/`; do\n"
@@ -292,7 +292,7 @@ class S3RemoteSync:
     tarballNameWithRev = format("%(package)s-%(version)s-%(revision)s.%(architecture)s.tar.gz",
                                 architecture=self.architecture,
                                 **spec)
-    cmd = format("cd %(workdir)s && "
+    cmd = format("set -x; cd %(workdir)s && "
                  "TARSHA256=`sha256sum %(storePath)s/%(tarballNameWithRev)s | awk '{ print $1 }'` && "
                  "s3cmd put -s -v --host s3.cern.ch --host-bucket %(b)s.s3.cern.ch %(storePath)s/%(tarballNameWithRev)s s3://%(b)s/%(storePath)s/ 2>/dev/null || true\n"
                  "HASHEDURL=`readlink %(linksPath)s/%(tarballNameWithRev)s | sed -e's|^../../||'` && "
