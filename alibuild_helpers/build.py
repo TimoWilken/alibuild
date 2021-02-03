@@ -84,7 +84,6 @@ def createDistLinks(spec, specs, args, repoType, requiresType):
                   v=spec["version"],
                   r=spec["revision"])
   shutil.rmtree(target, True)
-  cmd = format("cd %(w)s && mkdir -p %(t)s", w=args.workDir, t=target)
   links = []
   for x in [spec["package"]] + list(spec[requiresType]):
     dep = specs[x]
@@ -101,29 +100,26 @@ def createDistLinks(spec, specs, args, repoType, requiresType):
   # We do it in chunks to avoid hitting shell limits but
   # still do more than one symlink at the time, to save the
   # forking cost.
-  for g in [ links[i:i+10] for i in range(0, len(links), 10) ]:
-    execute(" && ".join([cmd] + g))
+  baseCmd = "cd %s && mkdir -p %s &&" % (args.workDir, target)
+  for i in range(0, len(links), 10):
+    execute(baseCmd + " && ".join(links[i:i+10]))
 
-  rsyncOptions = ""
   if args.writeStore.startswith("s3://"):
-    bucket = re.sub("^s3://", "", args.writeStore)
-    cmd = format("cd %(w)s && "
-                 "for x in `find %(t)s -type l`; do"
-                 "  HASHEDURL=`readlink $x | sed -e 's|.*/[.][.]/TARS|TARS|'` && "
-                 "  echo $HASHEDURL | s3cmd put --skip-existing -q -P -s --add-header=\"x-amz-website-redirect-location:https://s3.cern.ch/swift/v1/%(b)s/${HASHEDURL}\" --host s3.cern.ch --host-bucket %(b)s.s3.cern.ch - s3://%(b)s/$x 2>/dev/null;"
-                 "done",
-                 w=args.workDir,
-                 b=bucket,
-                 t=target)
-    execute(cmd)
+    execute(format(
+      r"""
+      cd %(w)s || exit 1
+      find %(t)s -type l | while read -r x; do
+        hashedurl=$(readlink $x | sed -e 's|.*/\.\./TARS|TARS|') || continue
+        echo $hashedurl |
+          s3cmd put --skip-existing -q -P -s \
+                --add-header="x-amz-website-redirect-location:https://s3.cern.ch/swift/v1/%(b)s/$hashedurl" \
+                --host s3.cern.ch --host-bucket %(b)s.s3.cern.ch - s3://%(b)s/$x 2>/dev/null
+      done
+      """, w=args.workDir, t=target, b=re.sub("^s3://", "", args.writeStore)))
   elif args.writeStore:
-    cmd = format("cd %(w)s && "
-                 "rsync -avR %(o)s --ignore-existing %(t)s/  %(rs)s/",
-                 w=args.workDir,
-                 rs=args.writeStore,
-                 o=rsyncOptions,
-                 t=target)
-    execute(cmd)
+    execute("cd %s && rsync -avR --ignore-existing %s/ %s/" %
+            (args.workDir, target, args.writeStore))
+
 
 def doBuild(args, parser):
   if args.remoteStore.startswith("http"):
@@ -291,8 +287,7 @@ def doBuild(args, parser):
           # is different and if there are extra changes on to.
           if spec["package"] in develPkgs:
             # Devel package: we get the commit hash from the checked source, not from remote.
-            cmd = "cd %s && git rev-parse HEAD" % spec["source"]
-            err, out = getstatusoutput(cmd)
+            err, out = getstatusoutput("cd %s && git rev-parse HEAD" % spec["source"])
             dieOnError(err, "Unable to detect current commit hash.")
             spec["commit_hash"] = out.strip()
             cmd = "cd %s && git diff -r HEAD && git status --porcelain" % spec["source"]
@@ -301,8 +296,7 @@ def doBuild(args, parser):
             debug("Got %d from %s", err, cmd)
             dieOnError(err, "Unable to detect source code changes.")
             spec["devel_hash"] = spec["commit_hash"] + h.hexdigest()
-            cmd = "cd %s && git rev-parse --abbrev-ref HEAD" % spec["source"]
-            err, out = getstatusoutput(cmd)
+            err, out = getstatusoutput("cd %s && git rev-parse --abbrev-ref HEAD" % spec["source"])
             if out == "HEAD":
               err, out = getstatusoutput("cd %s && git rev-parse HEAD" % spec["source"])
               out = out[0:10]
@@ -819,15 +813,11 @@ def doBuild(args, parser):
                  partialCloneStatement=partialCloneStatement,
                  requires=" ".join(spec["requires"]),
                  build_requires=" ".join(spec["build_requires"]),
-                 runtime_requires=" ".join(spec["runtime_requires"])
-                )
+                 runtime_requires=" ".join(spec["runtime_requires"]))
 
-    commonPath = "%s/%%s/%s/%s/%s-%s" % (workDir,
-                                         args.architecture,
-                                         spec["package"],
-                                         spec["version"],
-                                         spec["revision"])
-    scriptDir = commonPath % "SPECS"
+    scriptDir = "%s/%s/%s/%s/%s-%s" % (workDir, "SPECS", args.architecture,
+                                       spec["package"], spec["version"],
+                                       spec["revision"])
 
     err, out = getstatusoutput("mkdir -p %s" % scriptDir)
     writeAll("%s/build.sh" % scriptDir, cmd)
