@@ -10,6 +10,7 @@ from requests.exceptions import RequestException
 
 from alibuild_helpers.cmd import execute
 from alibuild_helpers.log import debug, error, warning, dieOnError
+from alibuild_helpers.utilities import format
 
 
 class NoRemoteSync:
