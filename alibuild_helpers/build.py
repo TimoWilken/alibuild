@@ -371,9 +371,7 @@ def doBuild(args, parser):
       h(str(time.time()))
     if spec["package"] in develPkgs and "incremental_recipe" in spec:
       h(spec["incremental_recipe"])
-      ih = Hasher()
-      ih(spec["incremental_recipe"])
-      spec["incremental_hash"] = ih.hexdigest()
+      spec["incremental_hash"] = Hasher(spec["incremental_recipe"]).hexdigest()
     elif p in develPkgs:
       h(spec.get("devel_hash"))
     if args.architecture.startswith("osx") and "relocate_paths" in spec:

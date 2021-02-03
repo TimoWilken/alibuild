@@ -405,11 +405,15 @@ def dockerStatusOutput(cmd, dockerImage=None, executor=getstatusoutput):
   return executor(cmd)
 
 class Hasher:
-  def __init__(self):
+  def __init__(self, init=None):
     self.h = hashlib.sha1()
+    if init is not None:
+      self.h.update(init)
+
   def __call__(self, txt):
     if not type(txt) == bytes:
       txt = txt.encode('utf-8', 'ignore')
     self.h.update(txt)
+
   def hexdigest(self):
     return self.h.hexdigest()
