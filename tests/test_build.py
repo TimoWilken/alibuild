@@ -77,15 +77,13 @@ version: v1
 """
 
 def dummy_getstatusoutput(x):
-  if re.match("/bin/bash --version", x):
+  if "/bin/bash --version" in x:
     return (0, "GNU bash, version 3.2.57(1)-release (x86_64-apple-darwin17)\nCopyright (C) 2007 Free Software Foundation, Inc.\n")
-  if re.match("mkdir -p [^;]*$", x):
-    return (0, "")
-  if re.match("ln -snf[^;]*$", x):
+  if ";" not in x and (x.startswith("mkdir -p ") or x.startswith("ln -snf")):
     return (0, "")
   return {
       "GIT_DIR=/alidist/.git git rev-parse HEAD": (0, "6cec7b7b3769826219dfa85e5daa6de6522229a0"),
-      'pip --disable-pip-version-check show alibuild | grep -e "^Version:" | sed -e \'s/.* //\'': (0, "v1.5.0"),
+      "pip --disable-pip-version-check show alibuild | sed -n '/^Version:/s/.* //p'": (0, "v1.5.0"),
       'which pigz': (1, ""),
       'tar --ignore-failed-read -cvvf /dev/null /dev/zero': (0, "")
     }[x]
@@ -121,11 +119,11 @@ def dummy_open(x, mode="r"):
 
 def dummy_execute(x, mock_git_clone, mock_git_fetch, **kwds):
   s = " ".join(x) if isinstance(x, list) else x
-  if re.match(".*ln -sfn.*TARS", s):
+  if "ln -sfn" in s and "TARS" in s:
     return 0
-  if re.search("^git clone --filter=blob:none --bare", s):
+  if s.startswith("git clone --filter=blob:none --bare"):
     mock_git_clone()
-  elif re.search("&& git fetch -f --tags", s):
+  elif "&& git fetch -f --tags" in s:
     mock_git_fetch()
     return 0
   return {

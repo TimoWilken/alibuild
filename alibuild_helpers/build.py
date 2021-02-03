@@ -53,30 +53,37 @@ def tar():
   return "tar" if err else "tar --ignore-failed-read"
 
 
-def writeAll(fn, txt):
-  f = open(fn, "w")
-  f.write(txt)
-  f.close()
+def writeAll(filename, txt):
+  """Write txt to a file with the given name."""
+  openf = open(filename, "w")
+  openf.write(txt)
+  openf.close()
 
-def readHashFile(fn):
+
+def readHashFile(filename):
+  """Read the hash from the given file, stripping newlines."""
   try:
-    return open(fn).read().strip("\n")
+    openf = open(filename)
+    out = openf.read().strip("\n")
+    openf.close()
+    return out
   except IOError:
     return "0"
 
-def getDirectoryHash(d):
-  if exists(join(d, ".git")):
-    err, out = getstatusoutput("GIT_DIR=%s/.git git rev-parse HEAD" % d)
-    dieOnError(err, "Impossible to find reference for %s " % d)
-  else:
-    err, out = getstatusoutput("pip --disable-pip-version-check show alibuild | grep -e \"^Version:\" | sed -e 's/.* //'")
-    dieOnError(err, "Impossible to find reference for %s " % d)
+
+def getDirectoryHash(directory):
+  """Get the git hash for the directory if possible, else alibuild's hash."""
+  err, out = getstatusoutput(
+    "GIT_DIR=%s/.git git rev-parse HEAD" % directory
+    if exists(join(directory, ".git")) else
+    "pip --disable-pip-version-check show alibuild | "
+    "sed -n '/^Version:/s/.* //p'")
+  dieOnError(err, "Impossible to find reference for %s" % directory)
   return out
 
 
-# Creates a directory in the store which contains symlinks to the package
-# and its direct / indirect dependencies
 def createDistLinks(spec, specs, args, repoType, requiresType):
+  """Create symlinks to the package and its dependencies in the store."""
   target = format("TARS/%(a)s/%(rp)s/%(p)s/%(p)s-%(v)s-%(r)s",
                   a=args.architecture,
                   rp=repoType,
@@ -84,22 +91,19 @@ def createDistLinks(spec, specs, args, repoType, requiresType):
                   v=spec["version"],
                   r=spec["revision"])
   shutil.rmtree(target, True)
-  links = []
-  for x in [spec["package"]] + list(spec[requiresType]):
-    dep = specs[x]
-    source = format("../../../../../TARS/%(a)s/store/%(sh)s/%(h)s/%(p)s-%(v)s-%(r)s.%(a)s.tar.gz",
-                    a=args.architecture,
-                    sh=dep["hash"][0:2],
-                    h=dep["hash"],
-                    p=dep["package"],
-                    v=dep["version"],
-                    r=dep["revision"])
-    links.append(format("ln -sfn %(source)s %(target)s",
-                 target=target,
-                 source=source))
-  # We do it in chunks to avoid hitting shell limits but
-  # still do more than one symlink at the time, to save the
-  # forking cost.
+  links = [
+    format("ln -sfn ../../../../../TARS/%(a)s/store/%(sh)s/%(h)s/%(p)s-%(v)s-%(r)s.%(a)s.tar.gz %(target)s",
+           target=target,
+           a=args.architecture,
+           sh=specs[x]["hash"][0:2],
+           h=specs[x]["hash"],
+           p=specs[x]["package"],
+           v=specs[x]["version"],
+           r=specs[x]["revision"])
+    for x in [spec["package"]] + list(spec[requiresType])
+  ]
+  # We do it in chunks to avoid hitting shell limits but still do more than one
+  # symlink at the time, to save the forking cost.
   baseCmd = "cd %s && mkdir -p %s &&" % (args.workDir, target)
   for i in range(0, len(links), 10):
     execute(baseCmd + " && ".join(links[i:i+10]))
@@ -122,6 +126,7 @@ def createDistLinks(spec, specs, args, repoType, requiresType):
 
 
 def doBuild(args, parser):
+  """Build the package specified in the args."""
   if args.remoteStore.startswith("http"):
     syncHelper = HttpRemoteSync(args.remoteStore, args.architecture, args.workDir, args.insecure)
   elif args.remoteStore.startswith("s3://"):
