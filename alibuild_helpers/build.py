@@ -159,8 +159,8 @@ def doBuild(args, parser):
 
   os.environ["ALIBUILD_ALIDIST_HASH"] = getDirectoryHash(args.configDir)
 
-  debug("Building for architecture %s" % args.architecture)
-  debug("Number of parallel builds: %d" % args.jobs)
+  debug("Building for architecture %s", args.architecture)
+  debug("Number of parallel builds: %d", args.jobs)
   debug(format("Using %(star)sBuild from "
                "%(star)sbuild@%(toolHash)s recipes "
                "in %(star)sdist@%(distHash)s",
@@ -198,11 +198,11 @@ def doBuild(args, parser):
     x["runtime_requires"] = [r for r in x["runtime_requires"] if not r in args.disable]
 
   if systemPackages:
-    banner("%sBuild can take the following packages from the system and will not build them:\n  %s" %
-           (star(), ", ".join(systemPackages)))
+    banner("%sBuild can take the following packages from the system and "
+           "will not build them:\n  %s", star(), ", ".join(systemPackages))
   if ownPackages:
-    banner("The following packages cannot be taken from the system and will be built:\n  %s" %
-           ", ".join(ownPackages))
+    banner("The following packages cannot be taken from the system and "
+           "will be built:\n  %s", ", ".join(ownPackages))
 
   # Do topological sort to have the correct build order even in the
   # case of non-tree like dependencies..
@@ -243,17 +243,19 @@ def doBuild(args, parser):
                           pkgs=", ".join(set(x.strip() for (x,y) in develPkgsUpper) - set(develPkgs))), 1)
 
   if buildOrder:
-    banner("Packages will be built in the following order:\n - %s" %
-           "\n - ".join([ x+" (development package)" if x in develPkgs else "%s@%s" % (x, specs[x]["tag"]) for x in buildOrder if x != "defaults-release" ]))
+    banner("Packages will be built in the following order:\n - %s",
+           "\n - ".join((x + " (development package)") if x in develPkgs
+                        else "%s@%s" % (x, specs[x]["tag"])
+                        for x in buildOrder if x != "defaults-release"))
 
   if develPkgs:
-    banner(format("You have packages in development mode.\n"
-                  "This means their source code can be freely modified under:\n\n"
-                  "  %(pwd)s/<package_name>\n\n"
-                  "%(star)sBuild does not automatically update such packages to avoid work loss.\n"
-                  "In most cases this is achieved by doing in the package source directory:\n\n"
-                  "  git pull --rebase\n",
-                  pwd=os.getcwd(), star=star()))
+    banner("You have packages in development mode.\n"
+           "This means their source code can be freely modified under:\n\n"
+           "  %s/<package_name>\n\n"
+           "%sBuild does not automatically update such packages to avoid work loss.\n"
+           "In most cases this is achieved by doing in the package source directory:\n\n"
+           "  git pull --rebase\n",
+           os.getcwd(), star())
 
   # Clone/update repos
   for p in [p for p in buildOrder if "source" in specs[p]]:
@@ -264,7 +266,7 @@ def doBuild(args, parser):
     if specs[p]["package"] in develPkgs:
        specs[p]["source"] = join(os.getcwd(), specs[p]["package"])
        cmd = "git ls-remote --heads %s" % specs[p]["source"]
-    debug("Executing %s" % cmd)
+    debug("Executing %s", cmd)
     res, output = getStatusOutputBash(cmd)
     dieOnError(res, "Error on '%s': %s" % (cmd, output))
     specs[p]["git_heads"] = output.split("\n")
@@ -296,7 +298,7 @@ def doBuild(args, parser):
             cmd = "cd %s && git diff -r HEAD && git status --porcelain" % spec["source"]
             h = Hasher()
             err = execute(cmd, h)
-            debug(err, cmd)
+            debug("Got %d from %s", err, cmd)
             dieOnError(err, "Unable to detect source code changes.")
             spec["devel_hash"] = spec["commit_hash"] + h.hexdigest()
             cmd = "cd %s && git rev-parse --abbrev-ref HEAD" % spec["source"]
@@ -339,7 +341,7 @@ def doBuild(args, parser):
   mainPackage = buildOrder[-1]
   mainHash = specs[mainPackage]["commit_hash"]
 
-  debug("Main package is %s@%s" % (mainPackage, mainHash))
+  debug("Main package is %s@%s", mainPackage, mainHash)
   if args.debug:
     logger_handler.setFormatter(
         LogFormatter("%%(asctime)s:%%(levelname)s:%s:%s: %%(message)s" %
@@ -351,7 +353,8 @@ def doBuild(args, parser):
   for p in buildOrder:
     spec = specs[p]
     if "source" in spec:
-      debug("Commit hash for %s@%s is %s" % (spec["source"], spec["tag"], spec["commit_hash"]))
+      debug("Commit hash for %s@%s is %s",
+            spec["source"], spec["tag"], spec["commit_hash"])
 
   # Calculate the hashes. We do this in build order so that we can guarantee
   # that the hashes of the dependencies are calculated first.  Also notice that
@@ -390,7 +393,7 @@ def doBuild(args, parser):
         h("relocate:"+" ".join(sorted(spec["relocate_paths"])))
     spec["hash"] = h.hexdigest()
     spec["deps_hash"] = dh.hexdigest()
-    debug("Hash for recipe %s is %s" % (p, spec["hash"]))
+    debug("Hash for recipe %s is %s", p, spec["hash"])
 
   # This adds to the spec where it should find, locally or remotely the
   # various tarballs and links.
@@ -438,7 +441,8 @@ def doBuild(args, parser):
     # a build_requires only anymore, so we drop it from the list.
     spec["full_build_requires"] = set(spec["full_build_requires"]) - spec["full_runtime_requires"]
 
-  debug("We will build packages in the following order: %s" % " ".join(buildOrder))
+  debug("We will build packages in the following order: %s",
+        " ".join(buildOrder))
   if args.dryRun:
     return (info, "--dry-run / -n specified. Not building.", 0)
 
@@ -468,7 +472,8 @@ def doBuild(args, parser):
           LogFormatter("%%(asctime)s:%%(levelname)s:%s:%s:%s: %%(message)s" %
                        (mainPackage, p, args.develPrefix if "develPrefix" in args else mainHash[0:8])))
     if spec["package"] in develPkgs and getattr(syncHelper, "writeStore", None):
-      warning("Disabling remote write store from now since %s is a development package." % spec["package"])
+      warning("Disabling remote write store from now since %s is a development package.",
+              spec["package"])
       syncHelper.writeStore = ""
 
     # Since we can execute this multiple times for a given package, in order to
@@ -501,13 +506,13 @@ def doBuild(args, parser):
                        a=args.architecture,
                        p=spec["package"],
                        v=spec["version"])
-    debug("Glob pattern used: %s" % linksGlob)
+    debug("Glob pattern used: %s", linksGlob)
     packages = glob(linksGlob)
     # In case there is no installed software, revision is 1
     # If there is already an installed package:
     # - Remove it if we do not know its hash
     # - Use the latest number in the version, to decide its revision
-    debug("Packages already built using this version\n%s" % "\n".join(packages))
+    debug("Packages already built using this version\n%s", "\n".join(packages))
     busyRevisions = []
 
     # Calculate the build_family for the package
@@ -551,7 +556,8 @@ def doBuild(args, parser):
         if spec["package"] in develPkgs and "incremental_recipe" in spec:
           spec["obsolete_tarball"] = d
         else:
-          debug("Package %s with hash %s is already found in %s. Not building." % (p, h, d))
+          debug("Package %s with hash %s is already found in %s. Not building.",
+                p, h, d)
           src = format("%(v)s-%(r)s",
                        w=workDir,
                        v=spec["version"],
@@ -568,7 +574,7 @@ def doBuild(args, parser):
 
           getstatusoutput("ln -snf %s %s" % (src, dst1))
           getstatusoutput("ln -snf %s %s" % (src, dst2))
-          info("Using cached build for %s" % p)
+          info("Using cached build for %s", p)
         break
       else:
         busyRevisions.append(revision)
@@ -580,7 +586,7 @@ def doBuild(args, parser):
 
     # Recreate symlinks to this development package builds.
     if spec["package"] in develPkgs:
-      debug("Creating symlinks to builds of devel package %s" % spec["package"])
+      debug("Creating symlinks to builds of devel package %s", spec["package"])
       cmd = format("ln -snf %(pkgHash)s %(wd)s/BUILD/%(pkgName)s-latest",
                    wd=workDir,
                    pkgName=spec["package"],
@@ -592,7 +598,7 @@ def doBuild(args, parser):
                       pkgHash=spec["hash"],
                       devPrefix=develPrefix)
       err = execute(cmd)
-      debug(err, cmd)
+      debug("Got %d from %s", err, cmd)
       # Last package built gets a "latest" mark.
       cmd = format("ln -snf %(pkgVersion)s-%(pkgRevision)s %(wd)s/%(arch)s/%(pkgName)s/latest",
                    wd=workDir,
@@ -610,13 +616,13 @@ def doBuild(args, parser):
                       pkgRevision=spec["revision"],
                       family=spec["build_family"])
       err = execute(cmd)
-      debug(err, cmd)
+      debug("Got %d from %s", err, cmd)
 
     # Check if this development package needs to be rebuilt.
     if spec["package"] in develPkgs:
-      debug("Checking if devel package %s needs rebuild" % spec["package"])
+      debug("Checking if devel package %s needs rebuild", spec["package"])
       if spec["devel_hash"]+spec["deps_hash"] == spec["old_devel_hash"]:
-        info("Development package %s does not need rebuild" % spec["package"])
+        info("Development package %s does not need rebuild", spec["package"])
         buildOrder.pop(0)
         continue
 
@@ -630,13 +636,15 @@ def doBuild(args, parser):
     fileHash = readHashFile(hashFile)
     if fileHash != spec["hash"]:
       if fileHash != "0":
-        debug("Mismatch between local area (%s) and the one which I should build (%s). Redoing." % (fileHash, spec["hash"]))
+        debug("Mismatch between local area (%s) and the one which I should "
+              "build (%s). Redoing.", fileHash, spec["hash"])
       shutil.rmtree(dirname(hashFile), True)
     else:
       # If we get here, we know we are in sync with whatever remote store.  We
       # can therefore create a directory which contains all the packages which
       # were used to compile this one.
-      debug("Package %s was correctly compiled. Moving to next one." % spec["package"])
+      debug("Package %s was correctly compiled. Moving to next one.",
+            spec["package"])
       # If using incremental builds, next time we execute the script we need to remove
       # the placeholders which avoid rebuilds.
       if spec["package"] in develPkgs and "incremental_recipe" in spec:
@@ -666,7 +674,7 @@ def doBuild(args, parser):
           cleanupDirs.append(format("%(w)s/SOURCES/%(p)s",
                                     w=workDir,
                                     p=spec["package"]))
-        debug("Cleaning up:\n" + "\n".join(cleanupDirs))
+        debug("Cleaning up:\n%s", "\n".join(cleanupDirs))
 
         for d in cleanupDirs:
           shutil.rmtree(d.encode("utf8"), True)
@@ -685,7 +693,7 @@ def doBuild(args, parser):
           pass
       continue
 
-    debug("Looking for cached tarball in %s" % spec["tarballHashDir"])
+    debug("Looking for cached tarball in %s", spec["tarballHashDir"])
     # FIXME: I should get the tarballHashDir updated with server at this point.
     #        It does not really matter that the symlinks are ok at this point
     #        as I only used the tarballs as reusable binary blobs.
@@ -825,9 +833,9 @@ def doBuild(args, parser):
     writeAll("%s/build.sh" % scriptDir, cmd)
     writeAll("%s/%s.sh" % (scriptDir, spec["package"]), spec["recipe"])
 
-    banner("Building %s@%s" % (spec["package"],
-                               args.develPrefix if "develPrefix" in args and spec["package"]  in develPkgs
-                                                else spec["version"]))
+    banner("Building %s@%s", spec["package"],
+           args.develPrefix if "develPrefix" in args and
+           spec["package"] in develPkgs else spec["version"])
     # Define the environment so that it can be passed up to the
     # actual build script
     buildEnvironment = [
@@ -953,10 +961,8 @@ def doBuild(args, parser):
               h=socket.gethostname(),
               defaults=args.defaults,
               wp=abspath(join(args.workDir, args.architecture))))
-  for x in develPkgs:
-    banner(format("Build directory for devel package %(p)s:\n%(w)s/BUILD/%(p)s-latest%(devSuffix)s/%(p)s",
-                  p=x,
-                  devSuffix="-"+args.develPrefix if "develPrefix" in args else "",
-                  w=abspath(args.workDir)))
+  for pkg in develPkgs:
+    banner("Build directory for devel package %s:\n%s/BUILD/%s-latest%s/%s",
+           pkg, abspath(args.workDir), pkg,
+           ("-" + args.develPrefipkg) if "develPrefix" in args else "", pkg)
   return (debug, "Everything done", 0)
-
