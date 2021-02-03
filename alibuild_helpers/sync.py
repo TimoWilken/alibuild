@@ -180,20 +180,18 @@ class HttpRemoteSync:
 
 # Helper class to sync package build directory using RSync.
 class RsyncRemoteSync:
-  def __init__(self, remoteStore, writeStore, architecture, workdir, rsyncOptions):
+  def __init__(self, remoteStore, writeStore, architecture, workdir):
     self.remoteStore = re.sub("^ssh://", "", remoteStore)
     self.writeStore = re.sub("^ssh://", "", writeStore)
     self.architecture = architecture
-    self.rsyncOptions = rsyncOptions
     self.workdir = workdir
 
   def syncToLocal(self, p, spec):
     debug("Updating remote store for package %s@%s", p, spec["hash"])
     err = execute(format(
       "mkdir -p %(tarballHashDir)s\n"
-      "rsync -av %(ro)s %(remoteStore)s/%(storePath)s/ %(tarballHashDir)s/ || true\n"
-      "rsync -av --delete %(ro)s %(remoteStore)s/%(linksPath)s/ %(tarballLinkDir)s/ || true\n",
-      ro=self.rsyncOptions,
+      "rsync -av %(remoteStore)s/%(storePath)s/ %(tarballHashDir)s/ || true\n"
+      "rsync -av --delete %(remoteStore)s/%(linksPath)s/ %(tarballLinkDir)s/ || true\n",
       remoteStore=self.remoteStore,
       storePath=spec["storePath"],
       linksPath=spec["linksPath"],
@@ -206,11 +204,10 @@ class RsyncRemoteSync:
       return
     err = execute(format(
       "cd %(workdir)s && "
-      "rsync -avR %(rsyncOptions)s --ignore-existing %(storePath)s/%(tarballNameWithRev)s %(remoteStore)s/ &&"
-      "rsync -avR %(rsyncOptions)s --ignore-existing %(linksPath)s/%(tarballNameWithRev)s %(remoteStore)s/",
+      "rsync -avR --ignore-existing %(storePath)s/%(tarballNameWithRev)s %(remoteStore)s/ &&"
+      "rsync -avR --ignore-existing %(linksPath)s/%(tarballNameWithRev)s %(remoteStore)s/",
       workdir=self.workdir,
       remoteStore=self.remoteStore,
-      rsyncOptions=self.rsyncOptions,
       storePath=spec["storePath"],
       linksPath=spec["linksPath"],
       tarballNameWithRev=format(
