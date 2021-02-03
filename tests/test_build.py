@@ -14,7 +14,8 @@ import sys
 git_mock = MagicMock(partialCloneFilter="--filter=blob:none")
 sys.modules["alibuild_helpers.git"] = git_mock
 
-from alibuild_helpers.build import doBuild, HttpRemoteSync, RsyncRemoteSync, NoRemoteSync
+from alibuild_helpers.build import doBuild
+from alibuild_helpers.sync import HttpRemoteSync, RsyncRemoteSync, NoRemoteSync
 from alibuild_helpers.analytics import decideAnalytics, askForAnalytics, report_screenview, report_exception, report_event
 from argparse import Namespace
 from io import BytesIO
@@ -157,7 +158,7 @@ def dummy_exists(x):
 
 # A few errors we should handle, together with the expected result
 class BuildTestCase(unittest.TestCase):
-  @patch("alibuild_helpers.build.get")
+  @patch("requests.get")
   @patch("alibuild_helpers.build.execute")
   @patch("alibuild_helpers.workarea.execute")
   @patch("alibuild_helpers.build.getstatusoutput")
@@ -166,13 +167,13 @@ class BuildTestCase(unittest.TestCase):
   @patch("alibuild_helpers.build.sys")
   @patch("alibuild_helpers.build.dieOnError")
   @patch("alibuild_helpers.build.readDefaults")
-  @patch("alibuild_helpers.build.makedirs")
+  @patch("os.makedirs")
   @patch("alibuild_helpers.build.debug")
   @patch("alibuild_helpers.utilities.open")
   @patch("alibuild_helpers.build.open")
   @patch("alibuild_helpers.build.shutil")
   @patch("alibuild_helpers.build.glob")
-  @patch("alibuild_helpers.build.readlink")
+  @patch("os.readlink")
   @patch("alibuild_helpers.build.banner")
   @patch("alibuild_helpers.build.getStatusOutputBash")
   @patch("alibuild_helpers.workarea.is_writeable")
@@ -253,18 +254,18 @@ class BuildTestCase(unittest.TestCase):
     self.assertEqual(mock_git_clone.call_count, 1, "Expected only one call to git clone (called %d times instead)" % mock_git_clone.call_count)
     self.assertEqual(mock_git_fetch.call_count, 1, "Expected only one call to git fetch (called %d times instead)" % mock_git_fetch.call_count)
 
-  @patch("alibuild_helpers.build.open")
-  @patch("alibuild_helpers.build.get")
-  @patch("alibuild_helpers.build.execute")
+  @patch("alibuild_helpers.sync.open")
+  @patch("requests.get")
+  @patch("alibuild_helpers.sync.execute")
   @patch("alibuild_helpers.build.getstatusoutput")
-  @patch("alibuild_helpers.build.os")
-  @patch("alibuild_helpers.build.dieOnError")
-  @patch("alibuild_helpers.build.warning")
-  @patch("alibuild_helpers.build.error")
-  def test_coverSyncs(self, mock_error, mock_warning, mock_die, mock_os, mock_getstatusoutput, mock_execute, mock_get, mock_open):
+  @patch("os.path.isfile")
+  @patch("alibuild_helpers.sync.dieOnError")
+  @patch("alibuild_helpers.sync.warning")
+  @patch("alibuild_helpers.sync.error")
+  def test_coverSyncs(self, mock_error, mock_warning, mock_die, mock_isfile, mock_getstatusoutput, mock_execute, mock_get, mock_open):
     syncers = [NoRemoteSync(),
                HttpRemoteSync(remoteStore="https://local/test", architecture="osx_x86-64", workdir="/sw", insecure=False),
-               RsyncRemoteSync(remoteStore="ssh://local/test", writeStore="ssh://local/test", architecture="osx_x86-64", workdir="/sw", rsyncOptions="")]
+               RsyncRemoteSync(remoteStore="ssh://local/test", writeStore="ssh://local/test", architecture="osx_x86-64", workdir="/sw")]
     dummy_spec = { "package"        : "zlib",
                    "version"        : "v1.2.3",
                    "revision"       : "1",
@@ -307,7 +308,7 @@ class BuildTestCase(unittest.TestCase):
                             { "name":"zlib-v1.2.3-2.slc7_x86-64.tar.gz" }])
     mock_get.side_effect = mockGet
     mock_open.side_effect = lambda fn,fmode: BytesIO()
-    mock_os.path.isfile.side_effect = lambda x: False  # file does not exist locally: force download
+    mock_isfile.side_effect = lambda x: False  # file does not exist locally: force download
 
     for testHash in [ "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "baadf00dbaadf00dbaadf00dbaadf00dbaadf00d" ]:
       dummy_spec["hash"] = testHash

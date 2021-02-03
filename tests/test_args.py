@@ -106,7 +106,7 @@ class ArgsTestCase(unittest.TestCase):
           self.assertEqual(args[k], v)
           mock_commands.mock_calls
 
-  @mock.patch('alibuild_helpers.args.argparse.ArgumentParser.error')
+  @mock.patch('argparse.ArgumentParser.error')
   def test_failingParsing(self, mock_print):
     mock_print.side_effect = FakeExit("raised")
     for (cmd, calls) in PARSER_ERRORS.items():
