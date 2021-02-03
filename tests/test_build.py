@@ -1,30 +1,27 @@
 from __future__ import print_function
-# Assuming you are using the mock library to ... mock things
-try:
-    from unittest.mock import patch, call, MagicMock, DEFAULT  # In Python 3, mock is built-in
-    from io import StringIO
-except ImportError:
-    from mock import patch, call, MagicMock, DEFAULT  # Python 2
-    from StringIO import StringIO
-try:
-  from collections import OrderedDict
-except ImportError:
-  from ordereddict import OrderedDict
-import sys
-git_mock = MagicMock(partialCloneFilter="--filter=blob:none")
-sys.modules["alibuild_helpers.git"] = git_mock
-
-from alibuild_helpers.build import doBuild
-from alibuild_helpers.sync import HttpRemoteSync, RsyncRemoteSync, NoRemoteSync
-from alibuild_helpers.analytics import decideAnalytics, askForAnalytics, report_screenview, report_exception, report_event
 from argparse import Namespace
 from io import BytesIO
 import os
 import os.path
-import re
-
+import sys
 import unittest
-import traceback
+
+from alibuild_helpers.build import doBuild
+from alibuild_helpers.sync import HttpRemoteSync, RsyncRemoteSync, NoRemoteSync
+
+# Assuming you are using the mock library to ... mock things
+try:
+  from unittest.mock import patch, MagicMock, DEFAULT  # In Python 3, mock is built-in
+  from io import StringIO
+except ImportError:
+  from mock import patch, MagicMock, DEFAULT  # Python 2
+  from StringIO import StringIO
+try:
+  from collections import OrderedDict
+except ImportError:
+  from ordereddict import OrderedDict
+git_mock = MagicMock(partialCloneFilter="--filter=blob:none")
+sys.modules["alibuild_helpers.git"] = git_mock
 
 class ExpectedExit(Exception):
   pass
