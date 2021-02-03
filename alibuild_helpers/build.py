@@ -1,37 +1,40 @@
-from os.path import abspath, exists, basename, dirname, join, realpath
-from os import makedirs, unlink, readlink, rmdir
-try:
-  from commands import getstatusoutput
-except ImportError:
-  from subprocess import getstatusoutput
-from alibuild_helpers.analytics import report_event
-from alibuild_helpers.log import debug, error, info, banner, warning
-from alibuild_helpers.log import dieOnError
-from alibuild_helpers.cmd import execute, getStatusOutputBash, BASH
-from alibuild_helpers.utilities import prunePaths
-from alibuild_helpers.utilities import format, dockerStatusOutput, parseDefaults, readDefaults
-from alibuild_helpers.utilities import getPackageList
-from alibuild_helpers.utilities import validateDefaults
-from alibuild_helpers.utilities import Hasher
-from alibuild_helpers.utilities import yamlDump
-from alibuild_helpers.git import partialCloneFilter
-import yaml
-from alibuild_helpers.sync import HttpRemoteSync, S3RemoteSync, RsyncRemoteSync, NoRemoteSync
-from alibuild_helpers.workarea import updateReferenceRepoSpec
-from alibuild_helpers.log import logger_handler, LogFormatter, ProgressPrint
+"""This module contains the actual build logic."""
+
+import os
+import re
+import shutil
+import socket
+import sys
+import time
+
 from datetime import datetime
 from glob import glob
+from os.path import abspath, exists, basename, dirname, join, realpath
 try:
   from collections import OrderedDict
 except ImportError:
   from ordereddict import OrderedDict
+try:
+  from commands import getstatusoutput
+except ImportError:
+  from subprocess import getstatusoutput
 
-import socket
-import os
-import re
-import shutil
-import sys
-import time
+import yaml
+
+from alibuild_helpers.analytics import report_event
+from alibuild_helpers.cmd import execute, getStatusOutputBash, BASH
+from alibuild_helpers.log import (
+  debug, error, info, banner, warning,
+  dieOnError, logger_handler, LogFormatter, ProgressPrint,
+)
+from alibuild_helpers.utilities import (
+  prunePaths, format, dockerStatusOutput, parseDefaults, readDefaults,
+  getPackageList, validateDefaults, Hasher, yamlDump,
+)
+from alibuild_helpers.git import partialCloneFilter
+from alibuild_helpers.sync import HttpRemoteSync, S3RemoteSync, RsyncRemoteSync, NoRemoteSync
+from alibuild_helpers.workarea import updateReferenceRepoSpec
+
 
 def star():
   return re.sub("build.*$", "", basename(sys.argv[0]).lower())
@@ -144,7 +147,7 @@ def doBuild(args, parser):
 
   specDir = "%s/SPECS" % workDir
   if not exists(specDir):
-    makedirs(specDir)
+    os.makedirs(specDir)
 
   os.environ["ALIBUILD_ALIDIST_HASH"] = getDirectoryHash(args.configDir)
 
@@ -521,7 +524,7 @@ def doBuild(args, parser):
       mainBuildFamily = spec["build_family"]
 
     for d in packages:
-      realPath = readlink(d)
+      realPath = os.readlink(d)
       matcher = format("../../%(a)s/store/[0-9a-f]{2}/([0-9a-f]*)/%(p)s-%(v)s-([0-9]*).%(a)s.tar.gz$",
                        a=args.architecture,
                        p=spec["package"],
@@ -628,10 +631,10 @@ def doBuild(args, parser):
       # If using incremental builds, next time we execute the script we need to remove
       # the placeholders which avoid rebuilds.
       if spec["package"] in develPkgs and "incremental_recipe" in spec:
-        unlink(hashFile)
+        os.unlink(hashFile)
       if "obsolete_tarball" in spec:
-        unlink(realpath(spec["obsolete_tarball"]))
-        unlink(spec["obsolete_tarball"])
+        os.unlink(realpath(spec["obsolete_tarball"]))
+        os.unlink(spec["obsolete_tarball"])
       # We need to create 2 sets of links, once with the full requires,
       # once with only direct dependencies, since that's required to
       # register packages in Alien.
@@ -659,18 +662,16 @@ def doBuild(args, parser):
         for d in cleanupDirs:
           shutil.rmtree(d.encode("utf8"), True)
         try:
-          unlink(format("%(w)s/BUILD/%(p)s-latest",
-                 w=workDir, p=spec["package"]))
+          os.unlink(format("%(w)s/BUILD/%(p)s-latest",
+                           w=workDir, p=spec["package"]))
           if "develPrefix" in args:
-            unlink(format("%(w)s/BUILD/%(p)s-latest-%(dp)s",
-                   w=workDir, p=spec["package"], dp=args.develPrefix))
+            os.unlink(format("%(w)s/BUILD/%(p)s-latest-%(dp)s",
+                             w=workDir, p=spec["package"], dp=args.develPrefix))
         except:
           pass
         try:
-          rmdir(format("%(w)s/BUILD",
-                w=workDir, p=spec["package"]))
-          rmdir(format("%(w)s/INSTALLROOT",
-                w=workDir, p=spec["package"]))
+          os.rmdir("%s/BUILD" % workDir)
+          os.rmdir("%s/INSTALLROOT" % workDir)
         except:
           pass
       continue
