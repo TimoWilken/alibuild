@@ -37,13 +37,21 @@ from alibuild_helpers.workarea import updateReferenceRepoSpec
 
 
 def star():
+  """Return the name prefix of this program."""
   return re.sub("build.*$", "", basename(sys.argv[0]).lower())
 
+
 def gzip():
-  return getstatusoutput("which pigz")[0] and "gzip" or "pigz"
+  """Return gzip executable to use."""
+  err, _ = getstatusoutput("which pigz")
+  return "gzip" if err else "pigz"
+
 
 def tar():
-  return getstatusoutput("tar --ignore-failed-read -cvvf /dev/null /dev/zero")[0] and "tar" or "tar --ignore-failed-read"
+  """Return tar command prefix to use."""
+  err, _ = getstatusoutput("tar --ignore-failed-read -cvvf /dev/null /dev/zero")
+  return "tar" if err else "tar --ignore-failed-read"
+
 
 def writeAll(fn, txt):
   f = open(fn, "w")
@@ -305,7 +313,8 @@ def doBuild(args, parser):
 
     # Version may contain date params like tag, plus %(commit_hash)s,
     # %(short_hash)s and %(tag)s.
-    defaults_upper = args.defaults != "release" and "_" + args.defaults.upper().replace("-", "_") or ""
+    defaults_upper = ("_" + args.defaults.upper().replace("-", "_")
+                      if args.defaults != "release" else "")
     spec["version"] = format(spec["version"],
                              commit_hash=spec["commit_hash"],
                              short_hash=spec["commit_hash"][0:10],
@@ -686,9 +695,8 @@ def doBuild(args, parser):
                   for x in glob("%s/*" % spec["tarballHashDir"])
                   if x.endswith("gz")]
       spec["cachedTarball"] = tarballs[0] if len(tarballs) else ""
-      debug(spec["cachedTarball"] and
-            "Found tarball in %s" % spec["cachedTarball"] or
-            "No cache tarballs found")
+      debug("Found tarball in %s" % spec["cachedTarball"]
+            if spec["cachedTarball"] else "No cache tarballs found")
 
     # Generate the part which sources the environment for all the dependencies.
     # Notice that we guarantee that a dependency is always sourced before the
@@ -727,8 +735,8 @@ def doBuild(args, parser):
     pathDict = spec.get("append_path", {})
     dieOnError(not isinstance(pathDict, dict),
                "Tag `append_path' in %s should be a dict." % p)
-    for pathName,pathVal in pathDict.items():
-      pathVal = isinstance(pathVal, list) and pathVal or [ pathVal ]
+    for pathName, pathVal in pathDict.items():
+      pathVal = pathVal if isinstance(pathVal, list) else [pathVal]
       if pathName == "DYLD_LIBRARY_PATH":
         continue
       environment += format("\ncat << \EOF >> \"$INSTALLROOT/etc/profile.d/init.sh\"\nexport %(key)s=$%(key)s:%(value)s\nEOF",
@@ -742,7 +750,7 @@ def doBuild(args, parser):
     dieOnError(not isinstance(pathDict, dict),
                "Tag `prepend_path' in %s should be a dict." % p)
     for pathName,pathVal in pathDict.items():
-      pathDict[pathName] = isinstance(pathVal, list) and pathVal or [ pathVal ]
+      pathDict[pathName] = pathVal if isinstance(pathVal, list) else [pathVal]
     for pathName,pathVal in defaultPrependPaths.items():
       pathDict[pathName] = [ pathVal ] + pathDict.get(pathName, [])
     for pathName,pathVal in pathDict.items():
@@ -797,8 +805,8 @@ def doBuild(args, parser):
                  workDir=workDir,
                  configDir=abspath(args.configDir),
                  incremental_recipe=spec.get("incremental_recipe", ":"),
-                 sourceDir=source and (dirname(source) + "/") or "",
-                 sourceName=source and basename(source) or "",
+                 sourceDir=(dirname(source) + "/") if source else "",
+                 sourceName=basename(source) if source else "",
                  referenceStatement=referenceStatement,
                  partialCloneStatement=partialCloneStatement,
                  requires=" ".join(spec["requires"]),
@@ -826,7 +834,7 @@ def doBuild(args, parser):
       ("ARCHITECTURE", args.architecture),
       ("BUILD_REQUIRES", " ".join(spec["build_requires"])),
       ("CACHED_TARBALL", cachedTarball),
-      ("CAN_DELETE", args.aggressiveCleanup and "1" or ""),
+      ("CAN_DELETE", "1" if args.aggressiveCleanup else ""),
       ("COMMIT_HASH", commit_hash),
       ("DEPS_HASH", spec.get("deps_hash", "")),
       ("DEVEL_HASH", spec.get("devel_hash", "")),
@@ -859,8 +867,8 @@ def doBuild(args, parser):
       additionalEnv = ""
       additionalVolumes = ""
       develVolumes = ""
-      mirrorVolume = "reference" in spec and " -v %s:/mirror" % dirname(spec["reference"]) or ""
-      overrideSource = source.startswith("/") and "-e SOURCE0_DIR_OVERRIDE=/" or ""
+      mirrorVolume = " -v %s:/mirror" % dirname(spec["reference"]) if "reference" in spec else ""
+      overrideSource = "-e SOURCE0_DIR_OVERRIDE=/" if source.startswith("/") else ""
 
       for devel in develPkgs:
         develVolumes += " -v $PWD/`readlink %s || echo %s`:/%s:ro " % (devel, devel, devel)
