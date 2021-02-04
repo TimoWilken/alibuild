@@ -256,3 +256,17 @@ class S3RemoteSync:
         "%(package)s-%(version)s-%(revision)s.%(architecture)s.tar.gz",
         architecture=self.architecture, **spec)))
     dieOnError(err, "Unable to upload tarball.")
+
+
+def chooseRemoteStore(args):
+  """Initialise the correct remote store, depending on command-line args."""
+  if args.remoteStore.startswith("http"):
+    return HttpRemoteSync(args.remoteStore, args.architecture,
+                          args.workDir, args.insecure)
+  if args.remoteStore.startswith("s3://"):
+    return S3RemoteSync(args.remoteStore, args.writeStore,
+                        args.architecture, args.workDir)
+  if args.remoteStore:
+    return RsyncRemoteSync(args.remoteStore, args.writeStore,
+                           args.architecture, args.workDir)
+  return NoRemoteSync()

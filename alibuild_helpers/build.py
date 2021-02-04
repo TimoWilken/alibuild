@@ -7,6 +7,7 @@ import socket
 import sys
 import time
 
+from collections import deque
 from datetime import datetime
 from glob import glob
 from os.path import abspath, exists, basename, dirname, join, realpath
@@ -32,7 +33,7 @@ from alibuild_helpers.utilities import (
   getPackageList, validateDefaults, Hasher, yamlDump,
 )
 from alibuild_helpers.git import partialCloneFilter
-from alibuild_helpers.sync import HttpRemoteSync, S3RemoteSync, RsyncRemoteSync, NoRemoteSync
+from alibuild_helpers.sync import chooseRemoteStore
 from alibuild_helpers.workarea import updateReferenceRepoSpec
 
 
@@ -125,22 +126,189 @@ def createDistLinks(spec, specs, args, repoType, requiresType):
             (args.workDir, target, args.writeStore))
 
 
+def dockerRunner(dockerImage):
+  """Return a function that runs a command in the given Docker image."""
+  def runInDocker(_, cmd):
+    return dockerStatusOutput(cmd, dockerImage, executor=getStatusOutputBash)
+  return runInDocker
+
+
+def createBuildOrder(specs):
+  """Sort packages into the order they should be built in.
+
+  Do topological sort to have the correct build order, even in the case of
+  non-tree like dependencies.
+
+  The actual algorithm used can be found at:
+  http://www.stoimen.com/blog/2012/10/01/computer-algorithms-topological-sort-of-a-graph/
+  """
+  # A list of (package, dependency) pairs mapping a package to its dependency.
+  # One pair per dependency relation.
+  edges = [(spec["package"], dep)
+           for spec in specs.values()
+           for dep in spec["requires"]]
+  # Start with "leaf" packages, i.e. those without dependencies.
+  queue = deque(spec for spec in specs.values() if not spec["requires"])
+  # Go through all the packages, scheduling dependencies to be built before the
+  # packages that depend on them.
+  while queue:
+    # Schedule the next package for building. All its dependencies (if any)
+    # have already been scheduled.
+    spec = queue.popleft()
+    yield spec["package"]
+    # Find all the packages that depend on the one we've just scheduled for
+    # building.
+    nextVertex = {pkg for pkg, dep in edges if dep == spec["package"]}
+    # Keep the dependency relations that don't involve the package we've just
+    # scheduled for building.
+    edges = [(pkg, dep) for pkg, dep in edges if dep != spec["package"]]
+    # Remove those packages that depend on something we haven't built yet.
+    nextVertex -= {pkg for pkg, _ in edges if pkg in nextVertex}
+    # Queue packages whose dependencies have all been scheduled already.
+    queue.extend(specs[m] for m in nextVertex)
+
+
+class ExternalCommandError(Exception):
+  """An external command indicated an error."""
+
+
+def getCommitRef(spec, develPkgs, args, nowKwds):
+  """Resolve the tag to the actual commit ref."""
+  spec["commit_hash"] = "0"
+
+  if "source" not in spec:
+    return ""
+
+  def cmdInRepo(spec, cmd):
+    return "cd %s && %s" % (spec["source"], cmd)
+
+  develPackageBranch = ""
+  # Tag may contain date params like %(year)s, %(month)s, %(day)s, %(hour).
+  spec["tag"] %= nowKwds
+  # By default we assume tag is a commit hash. We then try to find out if
+  # the tag is actually a branch and we use the tip of the branch as
+  # commit_hash. Finally if the package is a development one, we use the
+  # name of the branch as commit_hash.
+  spec["commit_hash"] = spec["tag"]
+
+  for head in spec["git_heads"]:
+    if not head.endswith("refs/heads/" + spec["tag"]) and \
+       spec["package"] not in develPkgs:
+      continue
+
+    spec["commit_hash"] = head.split("\t", 1)[0]
+    # We are in development mode, we need to rebuild if the commit hash is
+    # different, and if there are extra changes on top.
+    if spec["package"] in develPkgs:
+      # Development package: we get the commit hash from the checked source,
+      # not from the remote.
+      err, out = getstatusoutput(cmdInRepo(spec, "git rev-parse HEAD"))
+      dieOnError(err, "Unable to detect current commit hash.")
+      spec["commit_hash"] = out.strip()
+      cmd = cmdInRepo(spec, "git diff -r HEAD && git status --porcelain")
+      gitStatusHasher = Hasher()
+      err = execute(cmd, gitStatusHasher)
+      debug("Got %d from %s", err, cmd)
+      dieOnError(err, "Unable to detect source code changes.")
+      spec["devel_hash"] = spec["commit_hash"] + gitStatusHasher.hexdigest()
+      err, out = \
+        getstatusoutput(cmdInRepo(spec, "git rev-parse --abbrev-ref HEAD"))
+      if out == "HEAD":
+        err, out = getstatusoutput(cmdInRepo(spec, "git rev-parse HEAD"))
+        out = out[0:10]
+      if err:
+        raise ExternalCommandError()
+      develPackageBranch = out.replace("/", "-")
+      spec["tag"] = getattr(args, "develPrefix", develPackageBranch)
+      spec["commit_hash"] = "0"
+    break
+
+  # Version may contain date params like tag, plus %(commit_hash)s,
+  # %(short_hash)s and %(tag)s.
+  defaultsUpper = ("_" + args.defaults.upper().replace("-", "_")
+                   if args.defaults != "release" else "")
+  spec["version"] = format(spec["version"],
+                           commit_hash=spec["commit_hash"],
+                           short_hash=spec["commit_hash"][0:10],
+                           tag=spec["tag"],
+                           tag_basename=basename(spec["tag"]),
+                           defaults_upper=defaultsUpper,
+                           **nowKwds)
+
+  if spec["package"] in develPkgs and "develPrefix" in args and \
+     args.develPrefix != "ali-master":
+    spec["version"] = args.develPrefix
+
+  return develPackageBranch
+
+
+def calculateHashes(pkg, specs, develPkgs, architecture):
+  """Calculate package and dependency hashes."""
+  spec = specs[pkg]
+  pkgHasher = Hasher()
+  depHasher = Hasher()
+  for key in ("recipe", "version", "package", "commit_hash",
+              "env", "append_path", "prepend_path"):
+    if sys.version_info[0] < 3 and isinstance(spec.get(key), OrderedDict):
+      # Python 2: use YAML dict order to prevent changing hashes
+      pkgHasher(str(yaml.safe_load(yamlDump(spec[key]))))
+    else:
+      pkgHasher(str(spec.get(key, "none")))
+  # If the commit hash is a real hash, and not a tag, we can safely assume
+  # that's unique, and therefore we can avoid putting the repository or the
+  # name of the branch in the hash.
+  if spec["commit_hash"] == spec.get("tag", "0"):
+    pkgHasher(spec.get("source", "none"))
+    if "source" in spec:
+      pkgHasher(spec["tag"])
+  for dep in spec.get("requires", []):
+    pkgHasher(specs[dep]["hash"])
+    depHasher(specs[dep]["hash"])
+    depHasher(specs[dep].get("devel_hash", ""))
+  if spec.get("force_rebuild", False):
+    pkgHasher(str(time.time()))
+  if spec["package"] in develPkgs and "incremental_recipe" in spec:
+    pkgHasher(spec["incremental_recipe"])
+    spec["incremental_hash"] = Hasher(spec["incremental_recipe"]).hexdigest()
+  elif pkg in develPkgs:
+    pkgHasher(spec.get("devel_hash"))
+  if architecture.startswith("osx") and "relocate_paths" in spec:
+    pkgHasher("relocate:")
+    pkgHasher(" ".join(sorted(spec["relocate_paths"])))
+  spec["hash"] = pkgHasher.hexdigest()
+  spec["deps_hash"] = depHasher.hexdigest()
+
+
+def storePaths(spec, workDir, architecture):
+  """Adds to the spec where tarballs and symlinks can be found.
+
+  These paths should work locally and remotely.
+  """
+  pkgSpec = {
+    "workDir": workDir,
+    "package": spec["package"],
+    "version": spec["version"],
+    "hash": spec["hash"],
+    "prefix": spec["hash"][0:2],
+    "arch": architecture,
+  }
+  varSpecs = [
+    ("storePath", "TARS/%(arch)s/store/%(prefix)s/%(hash)s"),
+    ("linksPath", "TARS/%(arch)s/%(package)s"),
+    ("tarballHashDir", "%(workDir)s/TARS/%(arch)s/store/%(prefix)s/%(hash)s"),
+    ("tarballLinkDir", "%(workDir)s/TARS/%(arch)s/%(package)s"),
+    ("buildDir", "%(workDir)s/BUILD/%(hash)s/%(package)s"),
+  ]
+  spec.update({k: v % pkgSpec for k, v in varSpecs})
+  spec["old_devel_hash"] = \
+    readHashFile(join(spec["buildDir"], ".build_succeeded"))
+
+
 def doBuild(args, parser):
   """Build the package specified in the args."""
-  if args.remoteStore.startswith("http"):
-    syncHelper = HttpRemoteSync(args.remoteStore, args.architecture, args.workDir, args.insecure)
-  elif args.remoteStore.startswith("s3://"):
-    syncHelper = S3RemoteSync(args.remoteStore, args.writeStore,
-                              args.architecture, args.workDir)
-  elif args.remoteStore:
-    syncHelper = RsyncRemoteSync(args.remoteStore, args.writeStore, args.architecture, args.workDir)
-  else:
-    syncHelper = NoRemoteSync()
-
-  packages = args.pkgname
+  syncHelper = chooseRemoteStore(args)
   dockerImage = args.dockerImage if "dockerImage" in args else None
   specs = {}
-  buildOrder = []
   workDir = abspath(args.workDir)
   prunePaths(workDir)
 
@@ -149,14 +317,17 @@ def doBuild(args, parser):
                     "Maybe you need to \"cd\" to the right directory or " +
                     "you forgot to run \"aliBuild init\"?") % (star(), args.configDir), 1)
 
-  defaultsReader = lambda : readDefaults(args.configDir, args.defaults, parser.error, args.architecture)
-  (err, overrides, taps) = parseDefaults(args.disable,
-                                         defaultsReader, debug)
+  def defaultsReader():
+    return readDefaults(args.configDir, args.defaults,
+                        parser.error, args.architecture)
+  err, overrides, taps = parseDefaults(args.disable, defaultsReader, debug)
   dieOnError(err, err)
+  del err
 
   specDir = "%s/SPECS" % workDir
   if not exists(specDir):
     os.makedirs(specDir)
+  del specDir
 
   os.environ["ALIBUILD_ALIDIST_HASH"] = getDirectoryHash(args.configDir)
 
@@ -169,21 +340,24 @@ def doBuild(args, parser):
                toolHash=getDirectoryHash(dirname(__file__)),
                distHash=os.environ["ALIBUILD_ALIDIST_HASH"]))
 
-  (systemPackages, ownPackages, failed, validDefaults) = getPackageList(packages                = packages,
-                                                                        specs                   = specs,
-                                                                        configDir               = args.configDir,
-                                                                        preferSystem            = args.preferSystem,
-                                                                        noSystem                = args.noSystem,
-                                                                        architecture            = args.architecture,
-                                                                        disable                 = args.disable,
-                                                                        defaults                = args.defaults,
-                                                                        dieOnError              = dieOnError,
-                                                                        performPreferCheck      = lambda pkg, cmd : dockerStatusOutput(cmd, dockerImage, executor=getStatusOutputBash),
-                                                                        performRequirementCheck = lambda pkg, cmd : dockerStatusOutput(cmd, dockerImage, executor=getStatusOutputBash),
-                                                                        performValidateDefaults = lambda spec : validateDefaults(spec, args.defaults),
-                                                                        overrides               = overrides,
-                                                                        taps                    = taps,
-                                                                        log                     = debug)
+  systemPackages, ownPackages, failed, validDefaults = getPackageList(
+    packages                = args.pkgname,
+    specs                   = specs,
+    configDir               = args.configDir,
+    preferSystem            = args.preferSystem,
+    noSystem                = args.noSystem,
+    architecture            = args.architecture,
+    disable                 = args.disable,
+    defaults                = args.defaults,
+    dieOnError              = dieOnError,
+    performPreferCheck      = dockerRunner(dockerImage),
+    performRequirementCheck = dockerRunner(dockerImage),
+    performValidateDefaults = lambda spec: validateDefaults(spec, args.defaults),
+    overrides               = overrides,
+    taps                    = taps,
+    log                     = debug)
+  del overrides, taps
+
   if validDefaults and args.defaults not in validDefaults:
     return (error, "Specified default `%s' is not compatible with the packages you want to build.\n" % args.defaults +
                    "Valid defaults:\n\n- " +
@@ -205,24 +379,7 @@ def doBuild(args, parser):
     banner("The following packages cannot be taken from the system and "
            "will be built:\n  %s", ", ".join(ownPackages))
 
-  # Do topological sort to have the correct build order even in the
-  # case of non-tree like dependencies..
-  # The actual algorith used can be found at:
-  #
-  # http://www.stoimen.com/blog/2012/10/01/computer-algorithms-topological-sort-of-a-graph/
-  #
-  edges = [(p["package"], d) for p in specs.values() for d in p["requires"] ]
-  L = [l for l in specs.values() if not l["requires"]]
-  S = []
-  while L:
-    spec = L.pop(0)
-    S.append(spec)
-    nextVertex = [e[0] for e in edges if e[1] == spec["package"]]
-    edges = [e for e in edges if e[1] != spec["package"]]
-    hasPredecessors = set([m for e in edges for m in nextVertex if e[0] == m])
-    withPredecessor = set(nextVertex) - hasPredecessors
-    L += [specs[m] for m in withPredecessor]
-  buildOrder = [s["package"] for s in S]
+  buildOrder = deque(createBuildOrder(specs))
 
   # Date fields to substitute: they are zero-padded
   now = datetime.now()
@@ -238,10 +395,10 @@ def doBuild(args, parser):
                if p in develCandidates and p not in args.noDevel]
   develPkgsUpper = [(p, p.upper()) for p in buildOrder
                     if p.upper() in develCandidatesUpper and p not in args.noDevel]
-  if set(develPkgs) != set(x for (x, y) in develPkgsUpper):
+  if set(develPkgs) != set(x for x, _ in develPkgsUpper):
     return (error, format("The following development packages have wrong spelling: %(pkgs)s.\n"
                           "Please check your local checkout and adapt to the correct one indicated.",
-                          pkgs=", ".join(set(x.strip() for (x,y) in develPkgsUpper) - set(develPkgs))), 1)
+                          pkgs=", ".join(set(x.strip() for x, _ in develPkgsUpper) - set(develPkgs))), 1)
 
   if buildOrder:
     banner("Packages will be built in the following order:\n - %s",
@@ -259,73 +416,26 @@ def doBuild(args, parser):
            os.getcwd(), star())
 
   # Clone/update repos
-  for p in [p for p in buildOrder if "source" in specs[p]]:
+  for p in buildOrder:
+    if "source" not in specs[p]:
+      continue
     updateReferenceRepoSpec(args.referenceSources, p, specs[p], args.fetchRepos, not args.docker)
 
     # Retrieve git heads
-    cmd = "git ls-remote --heads %s" % (specs[p].get("reference", specs[p]["source"]))
+    cmd = "git ls-remote --heads " + specs[p].get("reference", specs[p]["source"])
     if specs[p]["package"] in develPkgs:
        specs[p]["source"] = join(os.getcwd(), specs[p]["package"])
-       cmd = "git ls-remote --heads %s" % specs[p]["source"]
+       cmd = "git ls-remote --heads " + specs[p]["source"]
     debug("Executing %s", cmd)
     res, output = getStatusOutputBash(cmd)
     dieOnError(res, "Error on '%s': %s" % (cmd, output))
     specs[p]["git_heads"] = output.split("\n")
 
-  # Resolve the tag to the actual commit ref
-  for p in buildOrder:
-    spec = specs[p]
-    spec["commit_hash"] = "0"
-    develPackageBranch = ""
-    if "source" in spec:
-      # Tag may contain date params like %(year)s, %(month)s, %(day)s, %(hour).
-      spec["tag"] = format(spec["tag"], **nowKwds)
-      # By default we assume tag is a commit hash. We then try to find
-      # out if the tag is actually a branch and we use the tip of the branch
-      # as commit_hash. Finally if the package is a development one, we use the
-      # name of the branch as commit_hash.
-      spec["commit_hash"] = spec["tag"]
-      for head in spec["git_heads"]:
-        if head.endswith("refs/heads/{0}".format(spec["tag"])) or spec["package"] in develPkgs:
-          spec["commit_hash"] = head.split("\t", 1)[0]
-          # We are in development mode, we need to rebuild if the commit hash
-          # is different and if there are extra changes on to.
-          if spec["package"] in develPkgs:
-            # Devel package: we get the commit hash from the checked source, not from remote.
-            err, out = getstatusoutput("cd %s && git rev-parse HEAD" % spec["source"])
-            dieOnError(err, "Unable to detect current commit hash.")
-            spec["commit_hash"] = out.strip()
-            cmd = "cd %s && git diff -r HEAD && git status --porcelain" % spec["source"]
-            h = Hasher()
-            err = execute(cmd, h)
-            debug("Got %d from %s", err, cmd)
-            dieOnError(err, "Unable to detect source code changes.")
-            spec["devel_hash"] = spec["commit_hash"] + h.hexdigest()
-            err, out = getstatusoutput("cd %s && git rev-parse --abbrev-ref HEAD" % spec["source"])
-            if out == "HEAD":
-              err, out = getstatusoutput("cd %s && git rev-parse HEAD" % spec["source"])
-              out = out[0:10]
-            if err:
-              return (error, "Error, unable to lookup changes in development package %s. Is it a git clone?" % spec["source"], 1)
-            develPackageBranch = out.replace("/", "-")
-            spec["tag"] = args.develPrefix if "develPrefix" in args else develPackageBranch
-            spec["commit_hash"] = "0"
-          break
-
-    # Version may contain date params like tag, plus %(commit_hash)s,
-    # %(short_hash)s and %(tag)s.
-    defaults_upper = ("_" + args.defaults.upper().replace("-", "_")
-                      if args.defaults != "release" else "")
-    spec["version"] = format(spec["version"],
-                             commit_hash=spec["commit_hash"],
-                             short_hash=spec["commit_hash"][0:10],
-                             tag=spec["tag"],
-                             tag_basename=basename(spec["tag"]),
-                             defaults_upper=defaults_upper,
-                             **nowKwds)
-
-    if spec["package"] in develPkgs and "develPrefix" in args and args.develPrefix != "ali-master":
-      spec["version"] = args.develPrefix
+  for pkg in buildOrder:
+    try:
+      develPackageBranch = getCommitRef(specs[pkg], develPkgs, args, nowKwds)
+    except ExternalCommandError:
+      return (error, "Error, unable to lookup changes in development package %s. Is it a git clone?" % spec["source"], 1)
 
   # Decide what is the main package we are building and at what commit.
   #
@@ -346,75 +456,22 @@ def doBuild(args, parser):
         LogFormatter("%%(asctime)s:%%(levelname)s:%s:%s: %%(message)s" %
                      (mainPackage, args.develPrefix if "develPrefix" in args else mainHash[0:8])))
 
-  # Now that we have the main package set, we can print out Useful information
-  # which we will be able to associate with this build. Also lets make sure each package
-  # we need to build can be built with the current default.
-  for p in buildOrder:
-    spec = specs[p]
-    if "source" in spec:
+  # Now that we have the main package set, we can print out useful information
+  # which we will be able to associate with this build.
+  for pkg in buildOrder:
+    if "source" in specs[pkg]:
       debug("Commit hash for %s@%s is %s",
-            spec["source"], spec["tag"], spec["commit_hash"])
+            specs[pkg]["source"], specs[pkg]["tag"], specs[pkg]["commit_hash"])
 
   # Calculate the hashes. We do this in build order so that we can guarantee
-  # that the hashes of the dependencies are calculated first.  Also notice that
-  # if the commit hash is a real hash, and not a tag, we can safely assume
-  # that's unique, and therefore we can avoid putting the repository or the
-  # name of the branch in the hash.
+  # that the hashes of the dependencies are calculated first.
   debug("Calculating hashes.")
-  for p in buildOrder:
-    spec = specs[p]
-    debug(spec)
-    debug(develPkgs)
-    h = Hasher()
-    dh = Hasher()
-    for x in ["recipe", "version", "package", "commit_hash",
-              "env", "append_path", "prepend_path"]:
-      if sys.version_info[0] < 3 and x in spec and type(spec[x]) == OrderedDict:
-        # Python 2: use YAML dict order to prevent changing hashes
-        h(str(yaml.safe_load(yamlDump(spec[x]))))
-      else:
-        h(str(spec.get(x, "none")))
-    if spec["commit_hash"] == spec.get("tag", "0"):
-      h(spec.get("source", "none"))
-      if "source" in spec:
-        h(spec["tag"])
-    for dep in spec.get("requires", []):
-      h(specs[dep]["hash"])
-      dh(specs[dep]["hash"] + specs[dep].get("devel_hash", ""))
-    if bool(spec.get("force_rebuild", False)):
-      h(str(time.time()))
-    if spec["package"] in develPkgs and "incremental_recipe" in spec:
-      h(spec["incremental_recipe"])
-      spec["incremental_hash"] = Hasher(spec["incremental_recipe"]).hexdigest()
-    elif p in develPkgs:
-      h(spec.get("devel_hash"))
-    if args.architecture.startswith("osx") and "relocate_paths" in spec:
-        h("relocate:"+" ".join(sorted(spec["relocate_paths"])))
-    spec["hash"] = h.hexdigest()
-    spec["deps_hash"] = dh.hexdigest()
-    debug("Hash for recipe %s is %s", p, spec["hash"])
-
-  # This adds to the spec where it should find, locally or remotely the
-  # various tarballs and links.
-  for p in buildOrder:
-    spec = specs[p]
-    pkgSpec = {
-      "workDir": workDir,
-      "package": spec["package"],
-      "version": spec["version"],
-      "hash": spec["hash"],
-      "prefix": spec["hash"][0:2],
-      "architecture": args.architecture
-    }
-    varSpecs = [
-      ("storePath", "TARS/%(architecture)s/store/%(prefix)s/%(hash)s"),
-      ("linksPath", "TARS/%(architecture)s/%(package)s"),
-      ("tarballHashDir", "%(workDir)s/TARS/%(architecture)s/store/%(prefix)s/%(hash)s"),
-      ("tarballLinkDir", "%(workDir)s/TARS/%(architecture)s/%(package)s"),
-      ("buildDir", "%(workDir)s/BUILD/%(hash)s/%(package)s")
-    ]
-    spec.update(dict([(x, format(y, **pkgSpec)) for (x, y) in varSpecs]))
-    spec["old_devel_hash"] = readHashFile(spec["buildDir"]+"/.build_succeeded")
+  debug("Development packages: %r", develPkgs)
+  for pkg in buildOrder:
+    debug("Recipe %s: %r", pkg, dict(specs[pkg]))
+    calculateHashes(pkg, specs, develPkgs, args.architecture)
+    debug("Hash for recipe %s is %s", pkg, specs[pkg]["hash"])
+    storePaths(specs[pkg], workDir, args.architecture)
 
   # We recursively calculate the full set of requires "full_requires"
   # including build_requires and the subset of them which are needed at
@@ -449,16 +506,14 @@ def doBuild(args, parser):
   # single one of them. This is done this way so that the second time we run we
   # can check if the build was consistent and if it is, we bail out.
   packageIterations = 0
-  report_event("install",
-               format("%(p)s disabled=%(dis)s devel=%(dev)s system=%(sys)s own=%(own)s deps=%(deps)s",
-                      p=args.pkgname,
-                      dis=",".join(sorted(args.disable)),
-                      dev=",".join(sorted(develPkgs)),
-                      sys=",".join(sorted(systemPackages)),
-                      own=",".join(sorted(ownPackages)),
-                      deps=",".join(buildOrder[:-1])
-                     ),
-               args.architecture)
+  report_event("install", "%s disabled=%s devel=%s system=%s own=%s deps=%s" % (
+    args.pkgname,
+    ",".join(sorted(args.disable)),
+    ",".join(sorted(develPkgs)),
+    ",".join(sorted(systemPackages)),
+    ",".join(sorted(ownPackages)),
+    ",".join(tuple(buildOrder)[:-1])
+  ), args.architecture)
 
   while buildOrder:
     packageIterations += 1
@@ -506,12 +561,11 @@ def doBuild(args, parser):
                        p=spec["package"],
                        v=spec["version"])
     debug("Glob pattern used: %s", linksGlob)
-    packages = glob(linksGlob)
     # In case there is no installed software, revision is 1
     # If there is already an installed package:
     # - Remove it if we do not know its hash
     # - Use the latest number in the version, to decide its revision
-    debug("Packages already built using this version\n%s", "\n".join(packages))
+    debug("Packages already built using this version\n%s", "\n".join(glob(linksGlob)))
     busyRevisions = []
 
     # Calculate the build_family for the package
@@ -536,7 +590,7 @@ def doBuild(args, parser):
     if spec["package"] == mainPackage:
       mainBuildFamily = spec["build_family"]
 
-    for d in packages:
+    for d in glob(linksGlob):
       realPath = os.readlink(d)
       matcher = format("../../%(a)s/store/[0-9a-f]{2}/([0-9a-f]*)/%(p)s-%(v)s-([0-9]*).%(a)s.tar.gz$",
                        a=args.architecture,
@@ -575,13 +629,13 @@ def doBuild(args, parser):
           getstatusoutput("ln -snf %s %s" % (src, dst2))
           info("Using cached build for %s", p)
         break
-      else:
-        busyRevisions.append(revision)
 
-    if not "revision" in spec and busyRevisions:
-      spec["revision"] = min(set(range(1, max(busyRevisions)+2)) - set(busyRevisions))
-    elif not "revision" in spec:
-      spec["revision"] = "1"
+      busyRevisions.append(revision)
+
+    if "revision" not in spec:
+      spec["revision"] = str(
+        min(set(range(1, max(busyRevisions) + 2)) - set(busyRevisions))
+        if busyRevisions else 1)
 
     # Recreate symlinks to this development package builds.
     if spec["package"] in develPkgs:
@@ -617,21 +671,18 @@ def doBuild(args, parser):
       err = execute(cmd)
       debug("Got %d from %s", err, cmd)
 
-    # Check if this development package needs to be rebuilt.
-    if spec["package"] in develPkgs:
+      # Check if this development package needs to be rebuilt.
       debug("Checking if devel package %s needs rebuild", spec["package"])
-      if spec["devel_hash"]+spec["deps_hash"] == spec["old_devel_hash"]:
+      if spec["devel_hash"] + spec["deps_hash"] == spec["old_devel_hash"]:
         info("Development package %s does not need rebuild", spec["package"])
-        buildOrder.pop(0)
+        buildOrder.popleft()
         continue
 
-    # Now that we have all the information about the package we want to build, let's
-    # check if it wasn't built / unpacked already.
-    hashFile = "%s/%s/%s/%s-%s/.build-hash" % (workDir,
-                                               args.architecture,
-                                               spec["package"],
-                                               spec["version"],
-                                               spec["revision"])
+    # Now that we have all the information about the package we want to build,
+    # let's check if it wasn't built / unpacked already.
+    hashFile = "%s/%s/%s/%s-%s/.build-hash" % (
+      workDir, args.architecture, spec["package"], spec["version"],
+      spec["revision"])
     fileHash = readHashFile(hashFile)
     if fileHash != spec["hash"]:
       if fileHash != "0":
@@ -657,7 +708,7 @@ def doBuild(args, parser):
       createDistLinks(spec, specs, args, "dist", "full_requires")
       createDistLinks(spec, specs, args, "dist-direct", "requires")
       createDistLinks(spec, specs, args, "dist-runtime", "full_runtime_requires")
-      buildOrder.pop(0)
+      buildOrder.popleft()
       packageIterations = 0
       # We can now delete the INSTALLROOT and BUILD directories,
       # assuming the package is not a development one. We also can
