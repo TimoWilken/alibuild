@@ -10,6 +10,7 @@ import time
 from collections import deque
 from datetime import datetime
 from glob import glob
+from itertools import chain
 from os.path import abspath, exists, basename, dirname, join, realpath
 try:
   from collections import OrderedDict
@@ -52,6 +53,14 @@ def tar():
   """Return tar command prefix to use."""
   err, _ = getstatusoutput("tar --ignore-failed-read -cvvf /dev/null /dev/zero")
   return "tar" if err else "tar --ignore-failed-read"
+
+
+def ignoreOSError(func, *args):
+  """Call func with args, swallowing any OSError."""
+  try:
+    return func(*args)
+  except OSError:
+    pass
 
 
 def writeAll(filename, txt):
@@ -334,12 +343,11 @@ def doBuild(args, parser):
 
   debug("Building for architecture %s", args.architecture)
   debug("Number of parallel builds: %d", args.jobs)
-  debug(format("Using %(star)sBuild from "
-               "%(star)sbuild@%(toolHash)s recipes "
-               "in %(star)sdist@%(distHash)s",
-               star=star(),
-               toolHash=getDirectoryHash(dirname(__file__)),
-               distHash=os.environ["ALIBUILD_ALIDIST_HASH"]))
+  debug("Using %(star)sBuild from %(star)sbuild@%(toolHash)s recipes "
+        "in %(star)sdist@%(distHash)s",
+        star=star(),
+        toolHash=getDirectoryHash(dirname(__file__)),
+        distHash=os.environ["ALIBUILD_ALIDIST_HASH"])
 
   systemPackages, ownPackages, failed, validDefaults = getPackageList(
     packages                = args.pkgname,
@@ -567,11 +575,9 @@ def doBuild(args, parser):
     # Decide how it should be called, based on the hash and what is already
     # available.
     debug("Checking for packages already built.")
-    linksGlob = format("%(w)s/TARS/%(a)s/%(p)s/%(p)s-%(v)s-*.%(a)s.tar.gz",
-                       w=workDir,
-                       a=args.architecture,
-                       p=spec["package"],
-                       v=spec["version"])
+    linksGlob = "%(w)s/TARS/%(a)s/%(p)s/%(p)s-%(v)s-*.%(a)s.tar.gz" % {
+      "w": workDir, "a": args.architecture, "p": spec["package"],
+      "v": spec["version"]}
     debug("Glob pattern used: %s", linksGlob)
     # In case there is no installed software, revision is 1
     # If there is already an installed package:
@@ -603,42 +609,30 @@ def doBuild(args, parser):
       mainBuildFamily = spec["build_family"]
 
     for d in glob(linksGlob):
-      realPath = os.readlink(d)
-      matcher = format("../../%(a)s/store/[0-9a-f]{2}/([0-9a-f]*)/%(p)s-%(v)s-([0-9]*).%(a)s.tar.gz$",
-                       a=args.architecture,
-                       p=spec["package"],
-                       v=spec["version"])
-      m = re.match(matcher, realPath)
-      if not m:
+      match = re.match(
+        "../../%(a)s/store/[0-9a-f]{2}/([0-9a-f]*)/%(p)s-%(v)s-([0-9]*).%(a)s.tar.gz$" %
+        {"a": args.architecture, "p": spec["package"], "v": spec["version"]},
+        os.readlink(d))
+      if not match:
         continue
-      h, revision = m.groups()
-      revision = int(revision)
+      linkHash = match.group(1)
+      revision = int(match.group(2))
 
       # If we have an hash match, we use the old revision for the package
       # and we do not need to build it.
-      if h == spec["hash"]:
+      if linkHash == spec["hash"]:
         spec["revision"] = revision
         if spec["package"] in develPkgs and "incremental_recipe" in spec:
           spec["obsolete_tarball"] = d
         else:
           debug("Package %s with hash %s is already found in %s. Not building.",
-                p, h, d)
-          src = format("%(v)s-%(r)s",
-                       w=workDir,
-                       v=spec["version"],
-                       r=spec["revision"])
-          dst1 = format("%(w)s/%(a)s/%(p)s/latest-%(bf)s",
-                        w=workDir,
-                        a=args.architecture,
-                        p=spec["package"],
-                        bf=spec["build_family"])
-          dst2 = format("%(w)s/%(a)s/%(p)s/latest",
-                        w=workDir,
-                        a=args.architecture,
-                        p=spec["package"])
-
-          getstatusoutput("ln -snf %s %s" % (src, dst1))
-          getstatusoutput("ln -snf %s %s" % (src, dst2))
+                p, linkHash, d)
+          src = "%s-%s" % (spec["version"], spec["revision"])
+          execute("ln -sfn %s %s/%s/%s/latest-%s" %
+                  (src, workDir, args.architecture, spec["package"],
+                   spec["build_family"]))
+          execute("ln -sfn %s %s/%s/%s/latest" %
+                  (src, workDir, args.architecture, spec["package"]))
           info("Using cached build for %s", p)
         break
 
@@ -652,34 +646,23 @@ def doBuild(args, parser):
     # Recreate symlinks to this development package builds.
     if spec["package"] in develPkgs:
       debug("Creating symlinks to builds of devel package %s", spec["package"])
-      cmd = format("ln -snf %(pkgHash)s %(wd)s/BUILD/%(pkgName)s-latest",
-                   wd=workDir,
-                   pkgName=spec["package"],
-                   pkgHash=spec["hash"])
+      cmd = "ln -sfn %s %s/BUILD/%s-latest" % (
+        spec["hash"], workDir, spec["package"])
       if develPrefix:
-        cmd += format(" && ln -snf %(pkgHash)s %(wd)s/BUILD/%(pkgName)s-latest-%(devPrefix)s",
-                      wd=workDir,
-                      pkgName=spec["package"],
-                      pkgHash=spec["hash"],
-                      devPrefix=develPrefix)
+        cmd += " && ln -sfn %s %s/BUILD/%s-latest-%s" % (
+          spec["hash"], workDir, spec["package"], develPrefix)
       err = execute(cmd)
       debug("Got %d from %s", err, cmd)
       # Last package built gets a "latest" mark.
-      cmd = format("ln -snf %(pkgVersion)s-%(pkgRevision)s %(wd)s/%(arch)s/%(pkgName)s/latest",
-                   wd=workDir,
-                   arch=args.architecture,
-                   pkgName=spec["package"],
-                   pkgVersion=spec["version"],
-                   pkgRevision=spec["revision"])
-      # Latest package built for a given devel prefix gets a "latest-%(family)s" mark.
+      cmd = "ln -sfn %s-%s %s/%s/%s/latest" % (
+        spec["version"], spec["revision"], workDir, args.architecture,
+        spec["package"])
+      # Latest package built for a given devel prefix gets a
+      # "latest-%(family)s" mark.
       if spec["build_family"]:
-        cmd += format(" && ln -snf %(pkgVersion)s-%(pkgRevision)s %(wd)s/%(arch)s/%(pkgName)s/latest-%(family)s",
-                      wd=workDir,
-                      arch=args.architecture,
-                      pkgName=spec["package"],
-                      pkgVersion=spec["version"],
-                      pkgRevision=spec["revision"],
-                      family=spec["build_family"])
+        cmd += " && ln -sfn %s-%s %s/%s/%s/latest-%s" % (
+          spec["version"], spec["revision"], workDir, args.architecture,
+          spec["package"], spec["build_family"])
       err = execute(cmd)
       debug("Got %d from %s", err, cmd)
 
@@ -707,8 +690,8 @@ def doBuild(args, parser):
       # were used to compile this one.
       debug("Package %s was correctly compiled. Moving to next one.",
             spec["package"])
-      # If using incremental builds, next time we execute the script we need to remove
-      # the placeholders which avoid rebuilds.
+      # If using incremental builds, next time we execute the script we need to
+      # remove the placeholders which avoid rebuilds.
       if spec["package"] in develPkgs and "incremental_recipe" in spec:
         os.unlink(hashFile)
       if "obsolete_tarball" in spec:
@@ -726,33 +709,21 @@ def doBuild(args, parser):
       # assuming the package is not a development one. We also can
       # delete the SOURCES in case we have aggressive-cleanup enabled.
       if not spec["package"] in develPkgs and args.autoCleanup:
-        cleanupDirs = [format("%(w)s/BUILD/%(h)s",
-                              w=workDir,
-                              h=spec["hash"]),
-                       format("%(w)s/INSTALLROOT/%(h)s",
-                              w=workDir,
-                              h=spec["hash"])]
+        cleanupDirs = [join(workDir, "BUILD", spec["hash"]),
+                       join(workDir, "INSTALLROOT", spec["hash"])]
         if args.aggressiveCleanup:
-          cleanupDirs.append(format("%(w)s/SOURCES/%(p)s",
-                                    w=workDir,
-                                    p=spec["package"]))
+          cleanupDirs.append(join(workDir, "SOURCES", spec["package"]))
         debug("Cleaning up:\n%s", "\n".join(cleanupDirs))
 
         for d in cleanupDirs:
           shutil.rmtree(d.encode("utf8"), True)
-        try:
-          os.unlink(format("%(w)s/BUILD/%(p)s-latest",
-                           w=workDir, p=spec["package"]))
-          if "develPrefix" in args:
-            os.unlink(format("%(w)s/BUILD/%(p)s-latest-%(dp)s",
-                             w=workDir, p=spec["package"], dp=args.develPrefix))
-        except:
-          pass
-        try:
-          os.rmdir("%s/BUILD" % workDir)
-          os.rmdir("%s/INSTALLROOT" % workDir)
-        except:
-          pass
+        ignoreOSError(os.unlink, "%s/BUILD/%s-latest" % (
+          workDir, spec["package"]))
+        if "develPrefix" in args:
+          ignoreOSError(os.unlink, "%s/BUILD/%s-latest-%s" % (
+            workDir, spec["package"], args.develPrefix))
+        ignoreOSError(os.rmdir, join(workDir, "BUILD"))
+        ignoreOSError(os.rmdir, join(workDir, "INSTALLROOT"))
       continue
 
     debug("Looking for cached tarball in %s", spec["tarballHashDir"])
@@ -764,7 +735,7 @@ def doBuild(args, parser):
       tarballs = [x
                   for x in glob("%s/*" % spec["tarballHashDir"])
                   if x.endswith("gz")]
-      spec["cachedTarball"] = tarballs[0] if len(tarballs) else ""
+      spec["cachedTarball"] = tarballs[0] if tarballs else ""
       debug("Found tarball in %s" % spec["cachedTarball"]
             if spec["cachedTarball"] else "No cache tarballs found")
 
@@ -783,72 +754,68 @@ def doBuild(args, parser):
         "revision": depSpec["revision"],
         "bigpackage": dep.upper().replace("-", "_")
       }
-      dependencies += format("[ -z ${%(bigpackage)s_REVISION+x} ] && source \"$WORK_DIR/$ALIBUILD_ARCH_PREFIX/%(package)s/%(version)s-%(revision)s/etc/profile.d/init.sh\"\n",
-                             **depInfo)
-      dependenciesInit += format('echo [ -z \${%(bigpackage)s_REVISION+x} ] \&\& source \${WORK_DIR}/\${ALIBUILD_ARCH_PREFIX}/%(package)s/%(version)s-%(revision)s/etc/profile.d/init.sh >> \"$INSTALLROOT/etc/profile.d/init.sh\"\n',
-                             **depInfo)
+      dependencies += (
+        '[ -z ${%(bigpackage)s_REVISION+x} ] && '
+        'source "$WORK_DIR/$ALIBUILD_ARCH_PREFIX/'
+        '%(package)s/%(version)s-%(revision)s/etc/profile.d/init.sh"\n'
+      ) % depInfo
+      dependenciesInit += (
+        r'echo [ -z \${%(bigpackage)s_REVISION+x} ] \&\& '
+        r'source \${WORK_DIR}/\${ALIBUILD_ARCH_PREFIX}/'
+        '%(package)s/%(version)s-%(revision)s/etc/profile.d/init.sh '
+        '>> \"$INSTALLROOT/etc/profile.d/init.sh\"\n'
+      ) % depInfo
+
     # Generate the part which creates the environment for the package.
     # This can be either variable set via the "env" keyword in the metadata
     # or paths which get appended via the "append_path" one.
     # By default we append LD_LIBRARY_PATH, PATH
-    environment = ""
-    dieOnError(not isinstance(spec.get("env", {}), dict),
-               "Tag `env' in %s should be a dict." % p)
-    for key,value in spec.get("env", {}).items():
-      if key == "DYLD_LIBRARY_PATH":
-        continue
-      environment += format("echo 'export %(key)s=\"%(value)s\"' >> $INSTALLROOT/etc/profile.d/init.sh\n",
-                            key=key,
-                            value=value)
-    basePath = "%s_ROOT" % p.upper().replace("-", "_")
+    for key in ("env", "append_path", "prepend_path"):
+      dieOnError(not isinstance(spec.get(key, {}), dict),
+                 "Tag `%s' in %s should be a dict." % (key, p))
+    # Prepend these paths so that they win against system ones.
+    basePath = p.upper().replace("-", "_") + "_ROOT"
+    defaultPrependPaths = {"LD_LIBRARY_PATH": "$%s/lib" % basePath,
+                           "PATH": "$%s/bin" % basePath}
+    prependPaths = {key: value if isinstance(value, list) else [value]
+                    for key, value in spec.get("prepend_path", {}).items()}
+    prependPaths.update({key: [prepend] + prependPaths.get(key, [])
+                         for key, prepend in defaultPrependPaths.items()})
 
-    pathDict = spec.get("append_path", {})
-    dieOnError(not isinstance(pathDict, dict),
-               "Tag `append_path' in %s should be a dict." % p)
-    for pathName, pathVal in pathDict.items():
-      pathVal = pathVal if isinstance(pathVal, list) else [pathVal]
-      if pathName == "DYLD_LIBRARY_PATH":
-        continue
-      environment += format("\ncat << \EOF >> \"$INSTALLROOT/etc/profile.d/init.sh\"\nexport %(key)s=$%(key)s:%(value)s\nEOF",
-                            key=pathName,
-                            value=":".join(pathVal))
+    environment = "".join(chain(
+      # Regular environment variables
+      ("echo 'export %s=\"%s\"' >> $INSTALLROOT/etc/profile.d/init.sh\n" % (k, v)
+       for k, v in spec.get("env", {}).items() if k != "DYLD_LIBRARY_PATH"),
 
-    # Same thing, but prepending the results so that they win against system ones.
-    defaultPrependPaths = { "LD_LIBRARY_PATH": "$%s/lib" % basePath,
-                            "PATH": "$%s/bin" % basePath }
-    pathDict = spec.get("prepend_path", {})
-    dieOnError(not isinstance(pathDict, dict),
-               "Tag `prepend_path' in %s should be a dict." % p)
-    for pathName,pathVal in pathDict.items():
-      pathDict[pathName] = pathVal if isinstance(pathVal, list) else [pathVal]
-    for pathName,pathVal in defaultPrependPaths.items():
-      pathDict[pathName] = [ pathVal ] + pathDict.get(pathName, [])
-    for pathName,pathVal in pathDict.items():
-      if pathName == "DYLD_LIBRARY_PATH":
-        continue
-      environment += format("\ncat << \EOF >> \"$INSTALLROOT/etc/profile.d/init.sh\"\nexport %(key)s=%(value)s${%(key)s+:$%(key)s}\nEOF",
-                            key=pathName,
-                            value=":".join(pathVal))
+      # Append paths
+      ("\ncat << \\EOF >> \"$INSTALLROOT/etc/profile.d/init.sh\""
+       "\nexport %(key)s=$%(key)s:%(value)s\nEOF" %
+       {"key": k, "value": v if not isinstance(v, list) else ":".join(v)}
+       for k, v in spec.get("append_path", {}).items()
+       if k != "DYLD_LIBRARY_PATH"),
+
+      # Prepend paths
+      ("\ncat << \\EOF >> \"$INSTALLROOT/etc/profile.d/init.sh\""
+       "\nexport %(key)s=%(value)s${%(key)s+:$%(key)s}\nEOF" %
+       {"key": k, "value": ":".join(v)}
+       for k, v in prependPaths.items() if k != "DYLD_LIBRARY_PATH"),
+    ))
 
     # The actual build script.
-    referenceStatement = ""
-    if "reference" in spec:
-      referenceStatement = "export GIT_REFERENCE=${GIT_REFERENCE_OVERRIDE:-%s}/%s" % (dirname(spec["reference"]), basename(spec["reference"]))
-
     partialCloneStatement = ""
     if partialCloneFilter and not args.docker:
       partialCloneStatement = "export GIT_PARTIAL_CLONE_FILTER='--filter=blob:none'"
 
     debug(spec)
 
-    cmd_raw = ""
+    rawcmd = ""
     try:
-      fp = open(dirname(realpath(__file__))+'/build_template.sh', 'r')
-      cmd_raw = fp.read()
+      fp = open(join(dirname(realpath(__file__)), "build_template.sh"), "r")
+      rawcmd = fp.read()
       fp.close()
     except:
       from pkg_resources import resource_string
-      cmd_raw = resource_string("alibuild_helpers", 'build_template.sh')
+      rawcmd = resource_string("alibuild_helpers", "build_template.sh")
 
     source = spec.get("source", "")
     # Shortend the commit hash in case it's a real commit hash and not simply
@@ -861,35 +828,34 @@ def doBuild(args, parser):
     # that when we use Docker we can replace sourceDir with the correct
     # container path, if required.  No changes for what concerns the standard
     # bash builds, though.
-    if args.docker:
-      cachedTarball = re.sub("^" + workDir, "/sw", spec["cachedTarball"])
-    else:
-      cachedTarball = spec["cachedTarball"]
-
-
-    cmd = format(cmd_raw,
-                 dependencies=dependencies,
-                 dependenciesInit=dependenciesInit,
-                 develPrefix=develPrefix,
-                 environment=environment,
-                 workDir=workDir,
-                 configDir=abspath(args.configDir),
-                 incremental_recipe=spec.get("incremental_recipe", ":"),
-                 sourceDir=(dirname(source) + "/") if source else "",
-                 sourceName=basename(source) if source else "",
-                 referenceStatement=referenceStatement,
-                 partialCloneStatement=partialCloneStatement,
-                 requires=" ".join(spec["requires"]),
-                 build_requires=" ".join(spec["build_requires"]),
-                 runtime_requires=" ".join(spec["runtime_requires"]))
+    cachedTarball = (re.sub("^" + workDir, "/sw", spec["cachedTarball"])
+                     if args.docker else spec["cachedTarball"])
 
     scriptDir = "%s/%s/%s/%s/%s-%s" % (workDir, "SPECS", args.architecture,
                                        spec["package"], spec["version"],
                                        spec["revision"])
-
-    err, out = getstatusoutput("mkdir -p %s" % scriptDir)
-    writeAll("%s/build.sh" % scriptDir, cmd)
+    err = execute("mkdir -p %s" % scriptDir)
+    dieOnError(err, "Could not create directory %s" % scriptDir)
     writeAll("%s/%s.sh" % (scriptDir, spec["package"]), spec["recipe"])
+    writeAll("%s/build.sh" % scriptDir, str(rawcmd) % {
+      "dependencies": dependencies,
+      "dependenciesInit": dependenciesInit,
+      "develPrefix": develPrefix,
+      "environment": environment,
+      "workDir": workDir,
+      "configDir": abspath(args.configDir),
+      "incremental_recipe": spec.get("incremental_recipe", ":"),
+      "sourceDir": (dirname(source) + "/") if source else "",
+      "sourceName": basename(source) if source else "",
+      "referenceStatement": (
+        "export GIT_REFERENCE=${GIT_REFERENCE_OVERRIDE:-%s}/%s" %
+        (dirname(spec["reference"]), basename(spec["reference"]))
+        if "reference" in spec else ""),
+      "partialCloneStatement": partialCloneStatement,
+      "requires": " ".join(spec["requires"]),
+      "build_requires": " ".join(spec["build_requires"]),
+      "runtime_requires": " ".join(spec["runtime_requires"]),
+    })
 
     banner("Building %s@%s", spec["package"],
            args.develPrefix if "develPrefix" in args and
@@ -930,95 +896,80 @@ def doBuild(args, parser):
     # In case the --docker options is passed, we setup a docker container which
     # will perform the actual build. Otherwise build as usual using bash.
     if args.docker:
-      additionalEnv = ""
-      additionalVolumes = ""
-      develVolumes = ""
-      mirrorVolume = " -v %s:/mirror" % dirname(spec["reference"]) if "reference" in spec else ""
-      overrideSource = "-e SOURCE0_DIR_OVERRIDE=/" if source.startswith("/") else ""
-
-      for devel in develPkgs:
-        develVolumes += " -v $PWD/`readlink %s || echo %s`:/%s:ro " % (devel, devel, devel)
-      for env in buildEnvironment:
-        additionalEnv += " -e %s='%s' " % env
-      for volume in args.volumes:
-        additionalVolumes += " -v %s " % volume
-      dockerWrapper = format("docker run --rm"
-              " --user $(id -u):$(id -g)"
-              " -v %(workdir)s:/sw"
-              " -v %(scriptDir)s/build.sh:/build.sh:ro"
-              " %(mirrorVolume)s"
-              " %(develVolumes)s"
-              " %(additionalEnv)s"
-              " %(additionalVolumes)s"
-              " -e GIT_REFERENCE_OVERRIDE=/mirror"
-              " %(overrideSource)s"
-              " -e WORK_DIR_OVERRIDE=/sw"
-              " %(image)s"
-              " -c \"%(bash)s -e -x /build.sh\"",
-              additionalEnv=additionalEnv,
-              additionalVolumes=additionalVolumes,
-              bash=BASH,
-              develVolumes=develVolumes,
-              workdir=abspath(args.workDir),
-              image=dockerImage,
-              mirrorVolume=mirrorVolume,
-              overrideSource=overrideSource,
-              scriptDir=scriptDir)
+      dockerWrapper = (
+        "docker run --rm --user $(id -u):$(id -g) -v %(workdir)s:/sw"
+        " -v %(scriptDir)s/build.sh:/build.sh:ro %(mirrorVolume)s"
+        " %(develVolumes)s %(additionalEnv)s %(additionalVolumes)s"
+        " -e GIT_REFERENCE_OVERRIDE=/mirror -e WORK_DIR_OVERRIDE=/sw"
+        " %(overrideSource)s %(image)s -c '%(bash)s -ex /build.sh'"
+      ) % {
+        "bash": BASH,
+        "scriptDir": scriptDir,
+        "workdir": abspath(args.workDir),
+        "image": dockerImage,
+        "additionalEnv": " ".join("-e %s='%s'" % env
+                                  for env in buildEnvironment),
+        "additionalVolumes": " ".join("-v %s" % volume
+                                      for volume in args.volumes),
+        "develVolumes": " ".join("-v $PWD/`readlink %s || echo %s`:/%s:ro" %
+                                 (devel, devel, devel) for devel in develPkgs),
+        "mirrorVolume": ("-v %s:/mirror" % dirname(spec["reference"])
+                         if "reference" in spec else ""),
+        "overrideSource": ("-e SOURCE0_DIR_OVERRIDE=/"
+                           if source.startswith("/") else ""),
+      }
       debug(dockerWrapper)
       err = execute(dockerWrapper)
     else:
       progress = ProgressPrint("%s is being built (use --debug for full output)" % spec["package"])
-      for k,v in buildEnvironment:
-        os.environ[k] = str(v)
+      for key, value in buildEnvironment:
+        os.environ[key] = str(value)
       err = execute("%s -e -x %s/build.sh 2>&1" % (BASH, scriptDir),
                     printer=debug if args.debug or not sys.stdout.isatty() else progress)
       progress.end("failed" if err else "ok", err)
-    report_event("BuildError" if err else "BuildSuccess",
-                 spec["package"],
-                 format("%(a)s %(v)s %(c)s %(h)s",
-                        a = args.architecture,
-                        v = spec["version"],
-                        c = spec["commit_hash"],
-                        h = os.environ["ALIBUILD_ALIDIST_HASH"][0:10]))
+    report_event("BuildError" if err else "BuildSuccess", spec["package"],
+                 " ".join((args.architecture, spec["version"], spec["commit_hash"],
+                           os.environ["ALIBUILD_ALIDIST_HASH"][0:10])))
 
-    updatablePkgs = [ x for x in spec["requires"] if x in develPkgs ]
+    updatablePkgs = [x for x in spec["requires"] if x in develPkgs]
     if spec["package"] in develPkgs:
       updatablePkgs.append(spec["package"])
 
-    buildErrMsg = format("Error while executing %(sd)s/build.sh on `%(h)s'.\n"
-                         "Log can be found in %(w)s/BUILD/%(p)s-latest%(devSuffix)s/log\n"
-                         "Please upload it to CERNBox/Dropbox if you intend to request support.\n"
-                         "Build directory is %(w)s/BUILD/%(p)s-latest%(devSuffix)s/%(p)s.",
-                         h=socket.gethostname(),
-                         sd=scriptDir,
-                         w=abspath(args.workDir),
-                         p=spec["package"],
-                         devSuffix="-" + args.develPrefix
-                                   if "develPrefix" in args and spec["package"] in develPkgs
-                                   else "")
+    buildErrMsg = format(
+      "Error while executing %(sd)s/build.sh on `%(h)s'.\n"
+      "Log can be found in %(bd)s/log\n"
+      "Please upload it to CERNBox/Dropbox if you intend to request support.\n"
+      "Build directory is %(bd)s.",
+      h=socket.gethostname(), sd=scriptDir, bd="%s/BUILD/%s-latest%s/%s" % (
+        abspath(args.workDir),
+        spec["package"],
+        "-" + args.develPrefix
+        if "develPrefix" in args and spec["package"] in develPkgs else "",
+        spec["package"]))
     if updatablePkgs:
-      buildErrMsg += format("\n\n"
-                            "Note that you have packages in development mode.\n"
-                            "Devel sources are not updated automatically, you must do it by hand.\n"
-                            "This problem might be due to one or more outdated devel sources.\n"
-                            "To update all development packages required for this build "
-                            "it is usually sufficient to do:\n%(updatablePkgs)s",
-                            updatablePkgs="".join(["\n  ( cd %s && git pull --rebase )" % dp
-                                                   for dp in updatablePkgs]))
+      buildErrMsg += (
+        "\n\nNote that you have packages in development mode.\n"
+        "Devel sources are not updated automatically, you must do it by hand.\n"
+        "This problem might be due to one or more outdated devel sources.\n"
+        "To update all development packages required for this build "
+        "it is usually sufficient to do:\n\n"
+      ) + "\n".join("  ( cd %s && git pull --rebase )" % dp
+                    for dp in updatablePkgs)
 
     dieOnError(err, buildErrMsg)
 
     syncHelper.syncToRemote(p, spec)
-  banner(format("Build of %(mainPackage)s successfully completed on `%(h)s'.\n"
-              "Your software installation is at:"
-              "\n\n  %(wp)s\n\n"
-              "You can use this package by loading the environment:"
-              "\n\n  alienv enter %(mainPackage)s/latest-%(buildFamily)s",
-              mainPackage=mainPackage,
-              buildFamily=mainBuildFamily,
-              h=socket.gethostname(),
-              defaults=args.defaults,
-              wp=abspath(join(args.workDir, args.architecture))))
+
+  banner("Build of %(mainPackage)s successfully completed on `%(h)s'.\n"
+         "Your software installation is at:"
+         "\n\n  %(wp)s\n\n"
+         "You can use this package by loading the environment:"
+         "\n\n  alienv enter %(mainPackage)s/latest-%(buildFamily)s",
+         mainPackage=mainPackage,
+         buildFamily=mainBuildFamily,
+         h=socket.gethostname(),
+         defaults=args.defaults,
+         wp=abspath(join(args.workDir, args.architecture)))
   for pkg in develPkgs:
     banner("Build directory for devel package %s:\n%s/BUILD/%s-latest%s/%s",
            pkg, abspath(args.workDir), pkg,

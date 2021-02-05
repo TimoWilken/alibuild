@@ -79,7 +79,7 @@ version: v1
 def dummy_getstatusoutput(x):
   if "/bin/bash --version" in x:
     return (0, "GNU bash, version 3.2.57(1)-release (x86_64-apple-darwin17)\nCopyright (C) 2007 Free Software Foundation, Inc.\n")
-  if ";" not in x and (x.startswith("mkdir -p ") or x.startswith("ln -snf")):
+  if ";" not in x and (x.startswith("mkdir -p ") or x.startswith("ln -sfn")):
     return (0, "")
   return {
       "GIT_DIR=/alidist/.git git rev-parse HEAD": (0, "6cec7b7b3769826219dfa85e5daa6de6522229a0"),
@@ -119,7 +119,7 @@ def dummy_open(x, mode="r"):
 
 def dummy_execute(x, mock_git_clone, mock_git_fetch, **kwds):
   s = " ".join(x) if isinstance(x, list) else x
-  if "ln -sfn" in s and "TARS" in s:
+  if "ln -sfn" in s or s.startswith("mkdir -p "):
     return 0
   if s.startswith("git clone --filter=blob:none --bare"):
     mock_git_clone()
