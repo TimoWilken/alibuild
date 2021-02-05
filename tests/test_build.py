@@ -235,7 +235,7 @@ class BuildTestCase(unittest.TestCase):
 
     mock_git_clone.reset_mock()
     mock_git_fetch.reset_mock()
-    fmt, msg, code = doBuild(args, mock_parser)
+    doBuild(args, mock_parser)
     self.assertEqual(mock_git_clone.call_count, 1, "Expected only one call to git clone (called %d times instead)" % mock_git_clone.call_count)
     self.assertEqual(mock_git_fetch.call_count, 0, "Expected only no calls to git fetch (called %d times instead)" % mock_git_fetch.call_count)
 
@@ -243,9 +243,10 @@ class BuildTestCase(unittest.TestCase):
     mock_git_clone.reset_mock()
     mock_git_fetch.reset_mock()
     args.fetchRepos = True
-    fmt, msg, code = doBuild(args, mock_parser)
+    success = doBuild(args, mock_parser)
     mock_glob.assert_called_with("/sw/TARS/osx_x86-64/ROOT/ROOT-v6-08-30-*.osx_x86-64.tar.gz")
-    self.assertEqual(msg, "Everything done")
+    self.assertTrue(success)
+    mock_debug.assert_called_with("Everything done")
     self.assertEqual(mock_git_clone.call_count, 1, "Expected only one call to git clone (called %d times instead)" % mock_git_clone.call_count)
     self.assertEqual(mock_git_fetch.call_count, 1, "Expected only one call to git fetch (called %d times instead)" % mock_git_fetch.call_count)
 

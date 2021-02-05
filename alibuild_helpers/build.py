@@ -313,9 +313,10 @@ def doBuild(args, parser):
   prunePaths(workDir)
 
   if not exists(args.configDir):
-    return (error, ("Cannot find %sdist recipes under directory \"%s\".\n" +
-                    "Maybe you need to \"cd\" to the right directory or " +
-                    "you forgot to run \"aliBuild init\"?") % (star(), args.configDir), 1)
+    error('Cannot find %sdist recipes under directory "%s".\n'
+          'Maybe you need to "cd" to the right directory or you forgot to run '
+          '"%sBuild init"?', star(), args.configDir, star())
+    return False
 
   def defaultsReader():
     return readDefaults(args.configDir, args.defaults,
@@ -359,13 +360,17 @@ def doBuild(args, parser):
   del overrides, taps
 
   if validDefaults and args.defaults not in validDefaults:
-    return (error, "Specified default `%s' is not compatible with the packages you want to build.\n" % args.defaults +
-                   "Valid defaults:\n\n- " +
-                   "\n- ".join(sorted(validDefaults)), 1)
+    error("Specified default `%s' is not compatible with the packages you want "
+          "to build.\nValid defaults:\n\n- %s",
+          args.defaults, "\n- ".join(sorted(validDefaults)))
+    return False
 
   if failed:
-    return (error, "The following packages are system requirements and could not be found:\n\n- " + "\n- ".join(sorted(list(failed))) +
-                   "\n\nPlease run:\n\n\taliDoctor %s\n\nto get a full diagnosis." % args.pkgname.pop(), 1)
+    error("The following packages are system requirements and could not be "
+          "found:\n\n- %s\n\nPlease run:\n\n\taliDoctor %s\n\n"
+          "to get a full diagnosis.",
+          "\n- ".join(sorted(failed)), args.pkgname.pop())
+    return False
 
   for x in specs.values():
     x["requires"] = [r for r in x["requires"] if not r in args.disable]
@@ -396,9 +401,10 @@ def doBuild(args, parser):
   develPkgsUpper = [(p, p.upper()) for p in buildOrder
                     if p.upper() in develCandidatesUpper and p not in args.noDevel]
   if set(develPkgs) != set(x for x, _ in develPkgsUpper):
-    return (error, format("The following development packages have wrong spelling: %(pkgs)s.\n"
-                          "Please check your local checkout and adapt to the correct one indicated.",
-                          pkgs=", ".join(set(x.strip() for x, _ in develPkgsUpper) - set(develPkgs))), 1)
+    error("The following development packages have wrong spelling: %s.\nPlease"
+          " check your local checkout and adapt to the correct one indicated.",
+          ", ".join(set(x.strip() for x, _ in develPkgsUpper) - set(develPkgs)))
+    return False
 
   if buildOrder:
     banner("Packages will be built in the following order:\n - %s",
@@ -435,7 +441,9 @@ def doBuild(args, parser):
     try:
       develPackageBranch = getCommitRef(specs[pkg], develPkgs, args, nowKwds)
     except ExternalCommandError:
-      return (error, "Error, unable to lookup changes in development package %s. Is it a git clone?" % spec["source"], 1)
+      error("Error, unable to lookup changes in development package %s. "
+            "Is it a git clone?", spec["source"])
+      return False
 
   # Decide what is the main package we are building and at what commit.
   #
@@ -446,7 +454,8 @@ def doBuild(args, parser):
   # If one of the special packages is in the list of packages to be built,
   # we use it as main package, rather than the last one.
   if not buildOrder:
-    return (banner, "Nothing to be done.", 0)
+    banner("Nothing to be done.")
+    return True
   mainPackage = buildOrder[-1]
   mainHash = specs[mainPackage]["commit_hash"]
 
@@ -500,7 +509,8 @@ def doBuild(args, parser):
   debug("We will build packages in the following order: %s",
         " ".join(buildOrder))
   if args.dryRun:
-    return (info, "--dry-run / -n specified. Not building.", 0)
+    info("--dry-run / -n specified. Not building.")
+    return True
 
   # We now iterate on all the packages, making sure we build correctly every
   # single one of them. This is done this way so that the second time we run we
@@ -518,7 +528,9 @@ def doBuild(args, parser):
   while buildOrder:
     packageIterations += 1
     if packageIterations > 20:
-      return (error, "Too many attempts at building %s. Something wrong with the repository?" % spec["package"], 1)
+      error("Too many attempts at building %s. "
+            "Something wrong with the repository?", spec["package"])
+      return False
     p = buildOrder[0]
     spec = specs[p]
     if args.debug:
@@ -1011,4 +1023,5 @@ def doBuild(args, parser):
     banner("Build directory for devel package %s:\n%s/BUILD/%s-latest%s/%s",
            pkg, abspath(args.workDir), pkg,
            ("-" + args.develPrefipkg) if "develPrefix" in args else "", pkg)
-  return (debug, "Everything done", 0)
+  debug("Everything done")
+  return True
