@@ -917,52 +917,37 @@ def doBuild(args, parser):
     # Recreate symlinks to this development package builds.
     if spec["package"] in develPkgs:
       debug("Creating symlinks to builds of devel package %s", spec["package"])
-      cmd = format("ln -snf %(pkgHash)s %(wd)s/BUILD/%(pkgName)s-latest",
-                   wd=workDir,
-                   pkgName=spec["package"],
-                   pkgHash=spec["hash"])
+      cmd = "mkdir -p {wd}/BUILD && ln -snf {hash} {wd}/BUILD/{pkg}-latest"
       if develPrefix:
-        cmd += format(" && ln -snf %(pkgHash)s %(wd)s/BUILD/%(pkgName)s-latest-%(devPrefix)s",
-                      wd=workDir,
-                      pkgName=spec["package"],
-                      pkgHash=spec["hash"],
-                      devPrefix=develPrefix)
-      err = execute(cmd)
+        cmd += " && ln -snf {hash} {wd}/BUILD/{pkg}-latest-{prefix}"
+      err = execute(cmd.format(wd=workDir, pkg=spec["package"],
+                               hash=spec["hash"], prefix=develPrefix))
       debug("Command %s returned %d", cmd, err)
       # Last package built gets a "latest" mark.
-      cmd = format("ln -snf %(pkgVersion)s-%(pkgRevision)s %(wd)s/%(arch)s/%(pkgName)s/latest",
-                   wd=workDir,
-                   arch=args.architecture,
-                   pkgName=spec["package"],
-                   pkgVersion=spec["version"],
-                   pkgRevision=spec["revision"])
+      cmd = "mkdir -p {wd}/{arch}/{pkg} && ln -snf {ver}-{rev} {wd}/{arch}/{pkg}/latest"
       # Latest package built for a given devel prefix gets a "latest-%(family)s" mark.
       if spec["build_family"]:
-        cmd += format(" && ln -snf %(pkgVersion)s-%(pkgRevision)s %(wd)s/%(arch)s/%(pkgName)s/latest-%(family)s",
-                      wd=workDir,
-                      arch=args.architecture,
-                      pkgName=spec["package"],
-                      pkgVersion=spec["version"],
-                      pkgRevision=spec["revision"],
-                      family=spec["build_family"])
-      err = execute(cmd)
+        cmd += " && ln -snf {ver}-{rev} {wd}/{arch}/{pkg}/latest-{family}"
+      err = execute(cmd.format(
+        wd=workDir, arch=args.architecture, family=spec["build_family"],
+        pkg=spec["package"], ver=spec["version"], rev=spec["revision"]))
       debug("Command %s returned %d", cmd, err)
 
+    debug("*** %r", dict(spec))
     # Check if this development package needs to be rebuilt.
     if spec["package"] in develPkgs:
       debug("Checking if devel package %s needs rebuild", spec["package"])
+      print(spec["devel_hash"], spec["deps_hash"], spec["old_devel_hash"])
       if spec["devel_hash"]+spec["deps_hash"] == spec["old_devel_hash"]:
         info("Development package %s does not need rebuild", spec["package"])
         buildOrder.pop(0)
         continue
 
-    # Now that we have all the information about the package we want to build, let's
-    # check if it wasn't built / unpacked already.
-    hashFile = "%s/%s/%s/%s-%s/.build-hash" % (workDir,
-                                               args.architecture,
-                                               spec["package"],
-                                               spec["version"],
-                                               spec["revision"])
+    # Now that we have all the information about the package we want to build,
+    # let's check if it wasn't built / unpacked already.
+    hashFile = "{wd}/{arch}/{pkg}/{ver}-{rev}/.build-hash".format(
+      wd=workDir, arch=args.architecture, pkg=spec["package"],
+      ver=spec["version"], rev=spec["revision"])
     fileHash = readHashFile(hashFile)
     if fileHash != spec["hash"]:
       if fileHash != "0":
@@ -1167,14 +1152,11 @@ def doBuild(args, parser):
                  runtime_requires=" ".join(spec["runtime_requires"])
                 )
 
-    commonPath = "%s/%%s/%s/%s/%s-%s" % (workDir,
-                                         args.architecture,
-                                         spec["package"],
-                                         spec["version"],
-                                         spec["revision"])
-    scriptDir = commonPath % "SPECS"
+    scriptDir = "{wd}/SPECS/{arch}/{pkg}/{ver}-{rev}".format(
+      wd=workDir, arch=args.architecture, pkg=spec["package"],
+      ver=spec["version"], rev=spec["revision"])
 
-    err, out = getstatusoutput("mkdir -p %s" % scriptDir)
+    execute("mkdir -p %s" % scriptDir)
     writeAll("%s/build.sh" % scriptDir, cmd)
     writeAll("%s/%s.sh" % (scriptDir, spec["package"]), spec["recipe"])
 
