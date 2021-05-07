@@ -9,7 +9,7 @@ from requests.exceptions import RequestException
 
 from alibuild_helpers.cmd import execute
 from alibuild_helpers.log import debug, warning, error, dieOnError
-from alibuild_helpers.utilities import format
+from alibuild_helpers.utilities import format, symlink
 
 
 # Helper class which does not do anything to sync
@@ -190,8 +190,8 @@ class HttpRemoteSync:
         "/".join((self.remoteStore, spec["remote_links_path"], linkname)),
         returnResult=True, log=False).decode("utf-8").rstrip("\r\n")
     for linkname, target in symlinks.items():
-      execute("ln -nsf ../../{target} {linkdir}/{name}".format(
-        linkdir=spec["remote_tar_link_dir"], target=target, name=linkname))
+      symlink(os.path.join(os.path.pardir, os.path.pardir, target),
+              os.path.join(spec["remote_tar_link_dir"], linkname))
 
     if not hasErr:
       self.doneOrFailed.append(spec["remote_revision_hash"])

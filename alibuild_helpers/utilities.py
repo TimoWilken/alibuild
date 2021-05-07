@@ -1,22 +1,24 @@
 #!/usr/bin/env python
-import subprocess, yaml
-try:
-  from commands import getstatusoutput
-except ImportError:
-  from subprocess import getstatusoutput
-from os.path import dirname, exists
-import base64
-import hashlib
-from glob import glob
-from os.path import basename
-import sys
-import os
-import re
-from datetime import datetime
 try:
   from collections import OrderedDict
 except ImportError:
   from ordereddict import OrderedDict
+try:
+  from commands import getstatusoutput
+except ImportError:
+  from subprocess import getstatusoutput
+from datetime import datetime
+from glob import glob
+import base64
+import hashlib
+import os
+import os.path
+import random
+import re
+import string
+import subprocess
+import sys
+import yaml
 
 class SpecError(Exception):
   pass
@@ -79,7 +81,7 @@ def resolve_version(spec, defaults, branch_basename, branch_stream):
                 tag=tag,
                 branch_basename = branch_basename,
                 branch_stream = branch_stream or tag,
-                tag_basename=basename(tag),
+                tag_basename=os.path.basename(tag),
                 defaults_upper=defaults_upper,
                 **nowKwds)
 
@@ -207,7 +209,7 @@ def getVersion():
     import pkg_resources  # part of setuptools
     return pkg_resources.require("alibuild")[0].version
   except:
-    cmd = "GIT_DIR=\'%s/.git\' git describe --tags" % dirname(dirname(__file__))
+    cmd = "GIT_DIR=\'%s/.git\' git describe --tags" % os.path.dirname(os.path.dirname(__file__))
     err, version = getstatusoutput(cmd)
     return version if not err else "Unknown version."
 
@@ -219,10 +221,10 @@ def filterByArchitecture(arch, requires):
 
 def readDefaults(configDir, defaults, error, architecture):
   defaultsFilename = "%s/defaults-%s.sh" % (configDir, defaults)
-  if not exists(defaultsFilename):
-    viableDefaults = ["- " + basename(x).replace("defaults-","").replace(".sh", "")
+  if not os.path.exists(defaultsFilename):
+    viableDefaults = ["- " + os.path.basename(x).replace("defaults-","").replace(".sh", "")
                       for x in glob("%s/defaults-*.sh" % configDir)]
-    error("Default `%s' does not exists. Viable options:\n%s",
+    error("Default `%s' does not exist. Viable options:\n%s",
           defaults or "<no defaults specified>", "\n".join(viableDefaults))
   err, defaultsMeta, defaultsBody = parseRecipe(getRecipeReader(defaultsFilename))
   if err:
@@ -231,7 +233,7 @@ def readDefaults(configDir, defaults, error, architecture):
   archDefaults = "%s/defaults-%s.sh" % (configDir, architecture)
   archMeta = {}
   archBody = ""
-  if exists(archDefaults):
+  if os.path.exists(archDefaults):
     err, archMeta, archBody = parseRecipe(getRecipeReader(defaultsFilename))
     if err:
       error("%s", err)
@@ -459,3 +461,26 @@ class Hasher:
     self.h.update(txt)
   def hexdigest(self):
     return self.h.hexdigest()
+
+def symlink(target, link_name, force=True):
+  """Create a symlink link_name -> target, overwriting link_name by default.
+
+  This function has the same behaviour as `ln -snf <target> <link_name>`,
+  except when link_name is an existing directory. In that case, this function
+  will fail, while ln would create the symlink link_name/basename(target).
+  """
+  try:
+    os.symlink(target, link_name)
+  except OSError:
+    if not force:
+      raise
+  else:
+    return
+  # If we can't symlink directly, create a temporary symlink first, then move
+  # it on top of the existing file or symlink.
+  tmp = os.path.join(
+    os.path.dirname(link_name),
+    "".join(random.choice(string.ascii_letters + string.digits)
+            for _ in range(16)))
+  os.symlink(target, tmp)
+  os.rename(tmp, link_name)

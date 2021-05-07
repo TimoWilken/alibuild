@@ -78,12 +78,13 @@ version: v1
 ---
 """
 
+def dummy_symlink(target, link_name, force=True):
+  return
+
 def dummy_getstatusoutput(x):
   if re.match("/bin/bash --version", x):
     return (0, "GNU bash, version 3.2.57(1)-release (x86_64-apple-darwin17)\nCopyright (C) 2007 Free Software Foundation, Inc.\n")
   if re.match("mkdir -p [^;]*$", x):
-    return (0, "")
-  if re.match("ln -snf[^;]*$", x):
     return (0, "")
   return {
       "GIT_DIR=/alidist/.git git rev-parse HEAD": (0, "6cec7b7b3769826219dfa85e5daa6de6522229a0"),
@@ -124,8 +125,6 @@ def dummy_open(x, mode="r"):
 
 def dummy_execute(x, mock_git_clone, mock_git_fetch, **kwds):
   s = " ".join(x) if isinstance(x, list) else x
-  if re.match(".*ln -sfn.*TARS", s):
-    return 0
   if re.search("^git clone --filter=blob:none --bare", s):
     mock_git_clone()
   elif re.search("&& git fetch -f --tags", s):
@@ -164,6 +163,7 @@ class BuildTestCase(unittest.TestCase):
   @patch("alibuild_helpers.workarea.execute")
   @patch("alibuild_helpers.sync.execute")
   @patch("alibuild_helpers.build.getstatusoutput", new=MagicMock(side_effect=dummy_getstatusoutput))
+  @patch("alibuild_helpers.build.symlink", new=MagicMock(side_effect=dummy_symlink))
   @patch("alibuild_helpers.build.exists", new=MagicMock(side_effect=dummy_exists))
   @patch("alibuild_helpers.workarea.path.exists", new=MagicMock(side_effect=dummy_exists))
   @patch("alibuild_helpers.build.sys")
@@ -248,6 +248,7 @@ class BuildTestCase(unittest.TestCase):
     self.assertEqual(mock_git_clone.call_count, 1, "Expected only one call to git clone (called %d times instead)" % mock_git_clone.call_count)
     self.assertEqual(mock_git_fetch.call_count, 1, "Expected only one call to git fetch (called %d times instead)" % mock_git_fetch.call_count)
 
+  @patch("alibuild_helpers.sync.symlink", new=MagicMock(side_effect=dummy_symlink))
   @patch("alibuild_helpers.sync.open", new=MagicMock(side_effect=lambda fn, mode: BytesIO()))
   @patch("alibuild_helpers.sync.get")
   @patch("alibuild_helpers.sync.execute")

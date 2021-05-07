@@ -5,19 +5,15 @@ try:
 except ImportError:
   from subprocess import getstatusoutput
 from alibuild_helpers.analytics import report_event
-from alibuild_helpers.log import debug, error, info, banner, warning
-from alibuild_helpers.log import dieOnError
+from alibuild_helpers.log import debug, error, info, banner, warning, dieOnError
 from alibuild_helpers.cmd import execute, getStatusOutputBash, BASH
-from alibuild_helpers.utilities import prunePaths
-from alibuild_helpers.utilities import format, dockerStatusOutput, parseDefaults, readDefaults
-from alibuild_helpers.utilities import getPackageList
-from alibuild_helpers.utilities import validateDefaults
-from alibuild_helpers.utilities import Hasher
-from alibuild_helpers.utilities import yamlDump
-from alibuild_helpers.utilities import resolve_tag, resolve_version
+from alibuild_helpers.utilities import (
+  symlink, prunePaths, resolve_tag, resolve_version,
+  format, dockerStatusOutput, parseDefaults, readDefaults,
+  getPackageList, validateDefaults, Hasher, yamlDump
+)
 from alibuild_helpers.git import partialCloneFilter
 from alibuild_helpers.sync import NoRemoteSync, HttpRemoteSync, S3RemoteSync, RsyncRemoteSync
-import yaml
 from alibuild_helpers.workarea import updateReferenceRepoSpec
 from alibuild_helpers.log import logger_handler, LogFormatter, ProgressPrint
 from datetime import datetime
@@ -34,6 +30,7 @@ import re
 import shutil
 import sys
 import time
+import yaml
 
 def star():
   return re.sub("build.*$", "", basename(sys.argv[0]).lower())
@@ -86,14 +83,7 @@ def createDistLinks(spec, specs, args, repoType, requiresType):
                     p=dep["package"],
                     v=dep["version"],
                     r=dep["revision"])
-    links.append(format("ln -sfn %(source)s %(target)s",
-                 target=target,
-                 source=source))
-  # We do it in chunks to avoid hitting shell limits but
-  # still do more than one symlink at the time, to save the
-  # forking cost.
-  for g in [ links[i:i+10] for i in range(0, len(links), 10) ]:
-    execute(" && ".join([cmd] + g))
+    symlink(source, target)
 
   rsyncOptions = ""
   if args.writeStore.startswith("s3://"):
@@ -609,23 +599,12 @@ def doBuild(args, parser):
       if spec["package"] in develPkgs and "incremental_recipe" in spec:
         spec["obsolete_tarball"] = d
       else:
-        debug("Package %s with hash %s is already found in %s. Not building.", p, h, d)
-        src = format("%(v)s-%(r)s",
-                     w=workDir,
-                     v=spec["version"],
-                     r=spec["revision"])
-        dst1 = format("%(w)s/%(a)s/%(p)s/latest-%(bf)s",
-                      w=workDir,
-                      a=args.architecture,
-                      p=spec["package"],
-                      bf=spec["build_family"])
-        dst2 = format("%(w)s/%(a)s/%(p)s/latest",
-                      w=workDir,
-                      a=args.architecture,
-                      p=spec["package"])
-
-        getstatusoutput("ln -snf %s %s" % (src, dst1))
-        getstatusoutput("ln -snf %s %s" % (src, dst2))
+        debug("Package %s with hash %s is already found in %s. Not building.",
+              p, h, d)
+        src = "{ver}-{rev}".format(ver=spec["version"], rev=spec["revision"])
+        targetdir = join(workDir, args.architecture, spec["package"])
+        symlink(src, join(targetdir, "latest-" + spec["build_family"]))
+        symlink(src, join(targetdir, "latest"))
         info("Using cached build for %s", p)
       break
 
@@ -655,36 +634,20 @@ def doBuild(args, parser):
     # Recreate symlinks to this development package builds.
     if spec["package"] in develPkgs:
       debug("Creating symlinks to builds of devel package %s", spec["package"])
-      cmd = format("ln -snf %(pkgHash)s %(wd)s/BUILD/%(pkgName)s-latest",
-                   wd=workDir,
-                   pkgName=spec["package"],
-                   pkgHash=spec["hash"])
+      symlink(spec["hash"], "{wd}/BUILD/{pkg}-latest".format(wd=workDir, pkg=spec["package"]))
       if develPrefix:
-        cmd += format(" && ln -snf %(pkgHash)s %(wd)s/BUILD/%(pkgName)s-latest-%(devPrefix)s",
-                      wd=workDir,
-                      pkgName=spec["package"],
-                      pkgHash=spec["hash"],
-                      devPrefix=develPrefix)
-      err = execute(cmd)
-      debug("Command %s returned %d", cmd, err)
+        symlink(spec["hash"], "{wd}/BUILD/{pkg}-latest-{prefix}".format(
+          wd=workDir, pkg=spec["package"], prefix=develPrefix))
       # Last package built gets a "latest" mark.
-      cmd = format("ln -snf %(pkgVersion)s-%(pkgRevision)s %(wd)s/%(arch)s/%(pkgName)s/latest",
-                   wd=workDir,
-                   arch=args.architecture,
-                   pkgName=spec["package"],
-                   pkgVersion=spec["version"],
-                   pkgRevision=spec["revision"])
+      symlink("{ver}-{rev}".format(ver=spec["version"], rev=spec["revision"]),
+              "{wd}/{arch}/{pkg}/latest".format(
+                wd=workDir, arch=args.architecture, pkg=spec["package"]))
       # Latest package built for a given devel prefix gets a "latest-%(family)s" mark.
       if spec["build_family"]:
-        cmd += format(" && ln -snf %(pkgVersion)s-%(pkgRevision)s %(wd)s/%(arch)s/%(pkgName)s/latest-%(family)s",
-                      wd=workDir,
-                      arch=args.architecture,
-                      pkgName=spec["package"],
-                      pkgVersion=spec["version"],
-                      pkgRevision=spec["revision"],
-                      family=spec["build_family"])
-      err = execute(cmd)
-      debug("Command %s returned %d", cmd, err)
+        symlink("{ver}-{rev}".format(ver=spec["version"], rev=spec["revision"]),
+                "{wd}/{arch}/{pkg}/latest-{family}".format(
+                  wd=workDir, arch=args.architecture, pkg=spec["package"],
+                  family=spec["build_family"]))
 
     # Check if this development package needs to be rebuilt.
     if spec["package"] in develPkgs:
